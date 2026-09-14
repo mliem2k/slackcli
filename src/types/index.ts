@@ -290,6 +290,25 @@ export interface SlackCanvas {
   permalink?: string;
 }
 
+// A section returned by canvases.sections.lookup: a targetable region of a
+// canvas document that a canvases.edit change can reference by section_id.
+export interface SlackCanvasSection {
+  id: string;
+  section_type?: string;
+}
+
+// One change operation for canvases.edit. section_id is required for every
+// operation except insert_at_start/insert_at_end, which apply to the whole
+// document rather than a specific section.
+export interface CanvasEditChange {
+  operation: 'insert_after' | 'insert_before' | 'insert_at_start' | 'insert_at_end' | 'replace' | 'delete';
+  section_id?: string;
+  document_content?: {
+    type: 'markdown';
+    markdown: string;
+  };
+}
+
 export interface CanvasListOptions {
   channel?: string;
   limit?: number;

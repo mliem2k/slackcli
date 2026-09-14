@@ -1,7 +1,8 @@
 import { Command } from 'commander';
 import ora, { type Ora } from 'ora';
+import { readFile } from 'node:fs/promises';
 import { getAuthenticatedClient } from '../lib/auth.ts';
-import { error, formatCanvasList, formatCanvasContent, warning, writeJson } from '../lib/formatter.ts';
+import { error, success, formatCanvasList, formatCanvasContent, warning, writeJson } from '../lib/formatter.ts';
 import { canvasHtmlToMarkdown } from '../lib/canvas-parser.ts';
 import {
   applyCanvasMentions,
@@ -12,7 +13,11 @@ import {
 } from '../lib/canvas-read.ts';
 import { normalizeIdentifier, workspaceMismatchWarning, workspaceOf } from '../lib/slack-url-parser.ts';
 import type { SlackClient } from '../lib/slack-client.ts';
-import type { SlackCanvas } from '../types/index.ts';
+import type { SlackCanvas, CanvasEditChange } from '../types/index.ts';
+
+const CANVAS_ID_PATTERN = /^F[A-Z0-9]+$/i;
+const EDIT_OPERATIONS = ['insert_after', 'insert_before', 'insert_at_start', 'insert_at_end', 'replace', 'delete'] as const;
+type EditOperation = typeof EDIT_OPERATIONS[number];
 
 // Warn when a pasted link points at a different workspace than the one we will call,
 // rather than letting Slack answer with a misleading not-found error.
@@ -164,6 +169,125 @@ export function createCanvasCommand(): Command {
         console.log('\n' + formatCanvasContent(file, markdown));
       } catch (err: any) {
         reportCanvasReadFailure(spinner, err);
+      }
+    });
+
+  // Find sections within a canvas, to get the section_id an edit needs to target
+  canvas
+    .command('sections')
+    .description('Find sections within a canvas, to get the section_id an edit needs to target')
+    .argument('<canvas-id>', 'Canvas file ID (e.g., F1234567890)')
+    .option('--contains-text <text>', 'Only return sections whose content contains this text')
+    .option('--types <types>', 'Comma-separated section types to match (e.g., h1,h2,default_section)')
+    .option('--workspace <id|name>', 'Workspace to use')
+    .option('--json', 'Output in JSON format', false)
+    .action(async (canvasId, options) => {
+      const spinner = ora('Looking up canvas sections...').start();
+
+      try {
+        if (!CANVAS_ID_PATTERN.test(canvasId)) {
+          spinner.fail('Invalid canvas ID');
+          error('Canvas ID must start with F followed by alphanumeric characters (e.g., F1234567890).');
+          process.exit(1);
+        }
+
+        const client = await getAuthenticatedClient(options.workspace);
+
+        const criteria: { section_types?: string[]; contains_text?: string } = {};
+        if (options.types) criteria.section_types = options.types.split(',').map((t: string) => t.trim());
+        if (options.containsText) criteria.contains_text = options.containsText;
+
+        const response = await client.lookupCanvasSections(canvasId, criteria);
+        const sections = response.sections || [];
+
+        if (sections.length === 0) {
+          spinner.succeed('No matching sections found');
+          return;
+        }
+
+        spinner.succeed(`Found ${sections.length} section(s)`);
+
+        if (options.json) {
+          writeJson({ sections });
+          return;
+        }
+
+        for (const section of sections) {
+          console.log(`  ${section.id}${section.section_type ? ` (${section.section_type})` : ''}`);
+        }
+      } catch (err: any) {
+        spinner.fail('Failed to look up canvas sections');
+        error(err.message);
+        process.exit(1);
+      }
+    });
+
+  // Apply one change operation to a canvas document
+  canvas
+    .command('edit')
+    .description('Apply one change operation to a canvas document (insert, replace, or delete a section)')
+    .argument('<canvas-id>', 'Canvas file ID (e.g., F1234567890)')
+    .requiredOption('--operation <operation>', `Change operation: ${EDIT_OPERATIONS.join(', ')}`)
+    .option('--section-id <id>', 'Target section ID (required for every operation except insert_at_start/insert_at_end)')
+    .option('--markdown <text>', 'Markdown content for insert/replace operations')
+    .option('--markdown-file <path>', 'Read markdown content from a file instead of --markdown')
+    .option('--workspace <id|name>', 'Workspace to use')
+    .option('--json', 'Output in JSON format', false)
+    .action(async (canvasId, options) => {
+      const spinner = ora('Applying canvas edit...').start();
+
+      try {
+        if (!CANVAS_ID_PATTERN.test(canvasId)) {
+          spinner.fail('Invalid canvas ID');
+          error('Canvas ID must start with F followed by alphanumeric characters (e.g., F1234567890).');
+          process.exit(1);
+        }
+
+        const operation = options.operation as string;
+        if (!EDIT_OPERATIONS.includes(operation as EditOperation)) {
+          spinner.fail('Invalid operation');
+          error(`Operation must be one of: ${EDIT_OPERATIONS.join(', ')}`);
+          process.exit(1);
+        }
+
+        if (operation !== 'insert_at_start' && operation !== 'insert_at_end' && !options.sectionId) {
+          spinner.fail('Missing --section-id');
+          error(`--section-id is required for the ${operation} operation. Use "canvas sections" to find it.`);
+          process.exit(1);
+        }
+
+        let markdown: string | undefined = options.markdown;
+        if (options.markdownFile) {
+          markdown = await readFile(options.markdownFile, 'utf-8');
+        }
+
+        if (operation !== 'delete' && !markdown) {
+          spinner.fail('Missing content');
+          error(`--markdown or --markdown-file is required for the ${operation} operation.`);
+          process.exit(1);
+        }
+
+        const change: CanvasEditChange = { operation: operation as EditOperation };
+        if (options.sectionId) change.section_id = options.sectionId;
+        if (operation !== 'delete') {
+          change.document_content = { type: 'markdown', markdown: markdown! };
+        }
+
+        const client = await getAuthenticatedClient(options.workspace);
+        const response = await client.editCanvas(canvasId, [change]);
+
+        spinner.succeed('Canvas updated');
+
+        if (options.json) {
+          writeJson(response);
+          return;
+        }
+
+        success(`Applied ${operation} to ${canvasId}`);
+      } catch (err: any) {
+        spinner.fail('Failed to edit canvas');
+        error(err.message);
+        process.exit(1);
       }
     });
 

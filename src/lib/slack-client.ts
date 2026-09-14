@@ -5,6 +5,7 @@ import type {
   SlackAuthTestResponse,
   SlackDraftListResponse,
   WorkspaceConfig,
+  CanvasEditChange,
 } from '../types/index.ts';
 import { parseMrkdwn } from './mrkdwn.ts';
 import { extractSlackWorkspaceName } from './curl-parser.ts';
@@ -728,6 +729,33 @@ export class SlackClient {
     if (canvasTab?.data?.file_id) return canvasTab.data.file_id;
 
     return null;
+  }
+
+  // Find sections within a canvas matching the given criteria, so a
+  // canvases.edit change can target one by section_id without having to
+  // parse the whole document structure client-side.
+  async lookupCanvasSections(canvasId: string, criteria: {
+    section_types?: string[];
+    contains_text?: string;
+  } = {}): Promise<any> {
+    const normalizedCriteria: Record<string, any> = {};
+    if (criteria.section_types) normalizedCriteria.section_types = criteria.section_types;
+    if (criteria.contains_text) {
+      normalizedCriteria.contains_text = { text: criteria.contains_text };
+    }
+
+    return this.request('canvases.sections.lookup', {
+      canvas_id: canvasId,
+      criteria: JSON.stringify(normalizedCriteria),
+    });
+  }
+
+  // Apply one or more change operations to a canvas document.
+  async editCanvas(canvasId: string, changes: CanvasEditChange[]): Promise<any> {
+    return this.request('canvases.edit', {
+      canvas_id: canvasId,
+      changes: JSON.stringify(changes),
+    });
   }
 
   // Check auth type
