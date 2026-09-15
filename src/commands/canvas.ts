@@ -2,6 +2,8 @@ import { Command } from 'commander';
 import ora, { type Ora } from 'ora';
 import { readFile } from 'node:fs/promises';
 import { getAuthenticatedClient } from '../lib/auth.ts';
+import { getWorkspace } from '../lib/workspaces.ts';
+import { editCanvasCellAuto } from '../lib/canvas-editor.ts';
 import { error, success, formatCanvasList, formatCanvasContent, warning, writeJson } from '../lib/formatter.ts';
 import { canvasHtmlToMarkdown } from '../lib/canvas-parser.ts';
 import {
@@ -286,6 +288,73 @@ export function createCanvasCommand(): Command {
         success(`Applied ${operation} to ${canvasId}`);
       } catch (err: any) {
         spinner.fail('Failed to edit canvas');
+        error(err.message);
+        process.exit(1);
+      }
+    });
+
+  // Edit one table cell by driving a real browser. `canvas edit` above hits
+  // canvases.edit, which Slack rejects for xoxc/xoxd session tokens
+  // (not_allowed_token_type); this works around that for the one shape of
+  // edit that comes up in practice, setting a cell in an existing table.
+  canvas
+    .command('edit-cell')
+    .description('Edit one table cell in a canvas by driving a real browser (for workspaces where canvases.edit is blocked)')
+    .argument('<canvas-id>', 'Canvas file ID (e.g., F1234567890)')
+    .requiredOption('--row-anchor <text>', 'Exact text of an existing cell that identifies the target row')
+    .requiredOption('--column-offset <n>', 'Cells to the right of the anchor cell to edit (0 edits the anchor cell itself)')
+    .requiredOption('--text <text>', 'Replacement text for the target cell (pass "" to clear it)')
+    .option('--headless', 'Run without a visible browser window (only works if already signed in)')
+    .option('--workspace <id|name>', 'Workspace to use')
+    .option('--json', 'Output in JSON format', false)
+    .action(async (canvasId, options) => {
+      const spinner = ora('Opening a browser to edit the canvas...').start();
+
+      try {
+        if (!CANVAS_ID_PATTERN.test(canvasId)) {
+          spinner.fail('Invalid canvas ID');
+          error('Canvas ID must start with F followed by alphanumeric characters (e.g., F1234567890).');
+          process.exit(1);
+        }
+
+        const columnOffset = parseInt(options.columnOffset, 10);
+        if (!Number.isFinite(columnOffset) || String(columnOffset) !== options.columnOffset.trim()) {
+          spinner.fail('Invalid --column-offset');
+          error('--column-offset must be an integer.');
+          process.exit(1);
+        }
+
+        const workspace = await getWorkspace(options.workspace);
+        if (!workspace) {
+          spinner.fail('No workspace configured');
+          error(
+            options.workspace
+              ? `Workspace not found: ${options.workspace}`
+              : 'No workspace configured. Run "slackcli auth login-auto" first.'
+          );
+          process.exit(1);
+        }
+
+        const canvasUrl = `https://app.slack.com/client/${workspace.workspace_id}/unified-files/doc/${canvasId}`;
+
+        const result = await editCanvasCellAuto(
+          { canvasUrl, rowAnchorText: options.rowAnchor, columnOffset, text: options.text },
+          { headless: options.headless === true }
+        );
+
+        if (!result.ok) {
+          spinner.fail('Canvas edit failed');
+          error(result.message);
+          process.exit(1);
+        }
+
+        spinner.succeed(`Cell updated: "${result.before}" to "${result.after}"`);
+
+        if (options.json) {
+          writeJson(result);
+        }
+      } catch (err: any) {
+        spinner.fail('Failed to edit canvas cell');
         error(err.message);
         process.exit(1);
       }
