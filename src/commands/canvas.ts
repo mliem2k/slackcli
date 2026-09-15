@@ -348,7 +348,48 @@ export function createCanvasCommand(): Command {
           process.exit(1);
         }
 
-        spinner.succeed(`Cell updated: "${result.before}" to "${result.after}"`);
+        // Belt and suspenders: editCanvasCellAuto already confirms the save via the in-browser
+        // network response, but that alone has been observed to report success for an edit that
+        // is not actually what ends up persisted, most likely several debounced saves from a
+        // multi-keystroke clear racing each other server-side. Re-fetching through the same REST
+        // path `canvas read` uses is a genuinely separate confirmation, not just a second look at
+        // the same browser session, and empirically needs real time (rapid retries too soon see
+        // stale content), so this polls with real delay rather than checking once.
+        spinner.text = 'Confirming the edit actually persisted...';
+        const client = await getAuthenticatedClient(options.workspace);
+        let persisted = false;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          try {
+            const fileInfo = await client.getFileInfo(canvasId);
+            const downloadUrl = fileInfo.file?.url_private_download || fileInfo.file?.url_private;
+            if (!downloadUrl) continue;
+            const html = await client.downloadFile(downloadUrl, MAX_FILE_SIZE);
+            const markdown = canvasHtmlToMarkdown(html);
+            // Clearing to empty has no positive text to search for; the closest verifiable
+            // signal is that the old content is actually gone (assumes `before` was specific
+            // enough not to appear elsewhere in the doc, true for every real use so far).
+            const matches =
+              options.text === '' ? result.before.length === 0 || !markdown.includes(result.before) : markdown.includes(options.text);
+            if (matches) {
+              persisted = true;
+              break;
+            }
+          } catch {
+            // Transient fetch failure, the retry loop covers it.
+          }
+        }
+
+        if (!persisted) {
+          spinner.fail('Canvas edit did not persist');
+          error(
+            'The browser reported a successful save, but re-fetching the canvas does not show the new text. ' +
+              'Run "slackcli canvas read" to check the live state before retrying.'
+          );
+          process.exit(1);
+        }
+
+        spinner.succeed(`Cell updated and confirmed persisted: "${result.before}" to "${result.after}"`);
 
         if (options.json) {
           writeJson(result);

@@ -85,6 +85,8 @@ interface FakeOptions {
   saveResponseStatus?: number;
   /** Scroll-step probes report "moved, not at bottom" until this many scroll calls have fired. */
   scrollStepsBeforeBottom?: number;
+  /** Simulates a click that landed mid-content: Backspace batches alone never report empty, only Delete does. */
+  requireDeleteToEmpty?: boolean;
 }
 
 function makeFakeSession(opts: FakeOptions): { session: CdpSession; calls: Array<{ method: string; params?: any }> } {
@@ -93,6 +95,14 @@ function makeFakeSession(opts: FakeOptions): { session: CdpSession; calls: Array
   let locatorIndex = 0;
   let navigateCount = 0;
   let scrollStepCount = 0;
+  // The clear loop presses Backspace/Delete and re-locates in between: once clearing has
+  // started (and before the replacement text is typed), every locate call reports the cell
+  // empty, exactly as the real editor would once enough keypresses have landed. This keeps
+  // clearFocusedCell's own batch/retry mechanics out of the locatorResults sequence, which
+  // otherwise only needs to describe the state before clicking and after typing.
+  let backspacePressed = false;
+  let deletePressed = false;
+  let insertedText = false;
 
   const session: CdpSession = {
     on(method, handler) {
@@ -107,6 +117,13 @@ function makeFakeSession(opts: FakeOptions): { session: CdpSession; calls: Array
         navigateCount += 1;
       }
 
+      if (method === 'Input.dispatchKeyEvent' && params?.key === 'Backspace') backspacePressed = true;
+      if (method === 'Input.dispatchKeyEvent' && params?.key === 'Delete') deletePressed = true;
+      const clearingStarted = opts.requireDeleteToEmpty ? deletePressed : backspacePressed || deletePressed;
+      if (method === 'Input.insertText') {
+        insertedText = true;
+      }
+
       if (method === 'Runtime.evaluate') {
         const expression = String(params?.expression ?? '');
         if (expression.includes('scrollBy')) {
@@ -114,15 +131,15 @@ function makeFakeSession(opts: FakeOptions): { session: CdpSession; calls: Array
           const atBottom = scrollStepCount >= (opts.scrollStepsBeforeBottom ?? 0);
           return { result: { value: { scrolled: !atBottom, atBottom } } } as T;
         }
-        if (expression.includes('selectAllChildren')) {
-          return { result: { value: true } } as T;
-        }
         if (!expression.startsWith('(() => {')) {
           const ready =
             opts.loadReadyAfterNavigateCount !== undefined
               ? navigateCount >= opts.loadReadyAfterNavigateCount
               : opts.loadReady !== false;
           return { result: { value: ready } } as T;
+        }
+        if (clearingStarted && !insertedText) {
+          return { result: { value: { found: true, x: 10, y: 20, currentText: '' } } } as T;
         }
         const value = opts.locatorResults[Math.min(locatorIndex, opts.locatorResults.length - 1)];
         locatorIndex += 1;
@@ -150,6 +167,38 @@ function makeFakeSession(opts: FakeOptions): { session: CdpSession; calls: Array
 const instantSleep = () => Promise.resolve();
 
 describe('editCanvasCell', () => {
+  it('re-locates by row id after the initial find, not by re-matching the anchor text', async () => {
+    // Reproduces a real live bug: with columnOffset 0, the anchor IS the cell being edited, so
+    // once its text changes, a text-based re-lookup for the readback can never find it again
+    // even though the edit succeeded ("cell no longer found" reported for a clean clear).
+    const { session, calls } = makeFakeSession({
+      locatorResults: [
+        { found: true, x: 10, y: 20, currentText: 'Working', rowId: 'row_abc123', targetIndex: 2 } as any,
+        { found: true, x: 10, y: 20, currentText: 'Done', rowId: 'row_abc123', targetIndex: 2 } as any,
+      ],
+      fireSaveRequestOnClick: true,
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Working', // same as the cell's own pre-edit text: anchor === target
+      columnOffset: 0,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    expect(result).toEqual({ ok: true, before: 'Working', after: 'Done' });
+
+    // The final readback is the last Runtime.evaluate call (nothing else touches it after).
+    // It must be the id-based locator, not a re-search by the now-stale anchor text: with
+    // columnOffset 0 the anchor is the cell itself, so once its text actually changed a
+    // text-based re-lookup could never find it again even though the edit succeeded.
+    const evaluateCalls = calls.filter((c) => c.method === 'Runtime.evaluate');
+    const lastExpression = String(evaluateCalls[evaluateCalls.length - 1]?.params?.expression ?? '');
+    expect(lastExpression).toContain('CSS.escape');
+    expect(lastExpression).toContain('row_abc123');
+    expect(lastExpression).not.toContain('rowAnchorText');
+  });
   it('clicks the located cell, clears it, types the replacement, and confirms the save', async () => {
     const { session, calls } = makeFakeSession({
       locatorResults: [
@@ -178,14 +227,36 @@ describe('editCanvasCell', () => {
       'Input.dispatchMouseEvent',
       'Input.dispatchMouseEvent',
     ]);
-    // Select-all-in-cell via JS, then a single Backspace (keyDown+keyUp) to delete it.
-    expect(methods.filter((m) => m === 'Input.dispatchKeyEvent').length).toBe(2);
-    expect(
-      calls.some(
-        (c) => c.method === 'Runtime.evaluate' && String(c.params?.expression).includes('selectAllChildren')
-      )
-    ).toBe(true);
+    // One full batch of 20 Backspace presses (keyDown+keyUp each = 40 events) fires before the
+    // fake session reports the cell empty; "Working" (7 chars) never needs a second batch.
+    const keyEvents = calls.filter((c) => c.method === 'Input.dispatchKeyEvent');
+    expect(keyEvents).toHaveLength(40);
+    expect(keyEvents.every((c) => c.params?.key === 'Backspace')).toBe(true);
     expect(calls.find((c) => c.method === 'Input.insertText')?.params).toEqual({ text: 'Done' });
+  });
+
+  it('falls back to Delete when Backspace alone cannot reach content after the click point', async () => {
+    const { session, calls } = makeFakeSession({
+      locatorResults: [
+        { found: true, x: 10, y: 20, currentText: 'Working' },
+        { found: true, x: 10, y: 20, currentText: 'Done' },
+      ],
+      fireSaveRequestOnClick: true,
+      requireDeleteToEmpty: true, // the click landed before some content; only Delete clears it
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Michael',
+      columnOffset: 1,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    expect(result).toEqual({ ok: true, before: 'Working', after: 'Done' });
+    const keyEvents = calls.filter((c) => c.method === 'Input.dispatchKeyEvent');
+    expect(keyEvents.some((c) => c.params?.key === 'Backspace')).toBe(true);
+    expect(keyEvents.some((c) => c.params?.key === 'Delete')).toBe(true);
   });
 
   it('skips the clear sequence when the cell was already empty', async () => {

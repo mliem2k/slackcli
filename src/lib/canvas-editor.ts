@@ -48,6 +48,12 @@ interface CellFound {
   x: number;
   y: number;
   currentText: string;
+  /** The row's own data-row-id and this cell's index within it, stable identity for re-locating
+   *  after the cell's own text has changed (an anchor is only reliable before it stops matching
+   *  its own pre-edit content, which breaks the moment columnOffset is 0 or a shared anchor cell
+   *  is itself edited by a separate call). */
+  rowId: string;
+  targetIndex: number;
 }
 interface CellNotFound {
   found: false;
@@ -90,6 +96,35 @@ export function buildCellLocatorExpression(rowAnchorText: string, columnOffset: 
       x: rect.left + rect.width / 2,
       y: rect.top + rect.height / 2,
       currentText: editable.textContent.trim(),
+      rowId,
+      targetIndex,
+    };
+  })()`;
+}
+
+/**
+ * Build the in-page expression that re-locates a cell by stable row/column identity rather than
+ * by matching an anchor cell's text, since the anchor's own text is exactly what may have just
+ * changed (columnOffset 0, or any anchor cell edited by an earlier step in the same operation).
+ */
+export function buildCellLocatorByIdExpression(rowId: string, targetIndex: number): string {
+  return `(() => {
+    const rowId = ${JSON.stringify(rowId)};
+    const targetIndex = ${JSON.stringify(targetIndex)};
+    const rowCells = Array.from(document.querySelectorAll('td.table-cell[data-row-id="' + CSS.escape(rowId) + '"]'));
+    if (targetIndex < 0 || targetIndex >= rowCells.length) {
+      return { found: false, reason: 'column_out_of_range' };
+    }
+    const editable = rowCells[targetIndex].querySelector('.table-cell-content');
+    if (!editable) return { found: false, reason: 'column_out_of_range' };
+    const rect = editable.getBoundingClientRect();
+    return {
+      found: true,
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      currentText: editable.textContent.trim(),
+      rowId,
+      targetIndex,
     };
   })()`;
 }
@@ -109,50 +144,55 @@ async function dispatchKey(
 }
 
 /**
- * Selects every child node of the target cell's editable element via the DOM Selection API,
- * re-located the same way `buildCellLocatorExpression` finds it.
+ * Clears whatever the target cell currently holds, verified against a real readback rather than
+ * assumed.
  *
- * Home/Shift+End only clears the current VISUAL line: on a long value that wraps across
- * several rendered lines within one cell (confirmed live, corrupted a real cell this way),
- * Shift+End stops at the wrap point, not the end of the cell's actual content, and Backspace
- * then deletes only that first visual line, leaving the rest behind mixed in with whatever gets
- * typed next. `Selection.selectAllChildren` operates on the DOM tree, not layout, so it selects
- * the whole cell regardless of how many lines it wraps to on screen.
+ * Three approaches were tried and confirmed broken against this editor before this one, all live,
+ * all against the real canvas. Home + Shift+End only clears the current VISUAL line, so a value
+ * long enough to wrap across several rendered lines within one cell gets partially deleted, its
+ * remainder left mixed in with whatever gets typed next. Setting a DOM Selection via
+ * `Selection.selectAllChildren` and then dispatching one Backspace does nothing at all, this
+ * editor keeps its own internal selection model (confirmed React/Slate-shaped) that a
+ * programmatic browser Selection is not synced into, so a subsequent Backspace has no selection
+ * to act on from the editor's own point of view even though the raw DOM API reports one.
+ * Real per-character Backspace keypresses fired back to back with no delay also only partially
+ * work, on a ~290 character cell roughly half the presses landed and the rest were silently
+ * dropped, confirmed by pressing one at a time with a short delay between each: the exact same
+ * key sequence, slowed down, reliably deletes everything. So this presses one key at a time with
+ * a small delay, re-reading the cell periodically and stopping the moment it is actually empty.
  */
-function buildSelectAllInCellExpression(rowAnchorText: string, columnOffset: number): string {
-  return `(() => {
-    const rowAnchorText = ${JSON.stringify(rowAnchorText)};
-    const columnOffset = ${JSON.stringify(columnOffset)};
-    const cells = Array.from(document.querySelectorAll('td.table-cell'));
-    const anchorCell = cells.find((td) => {
-      const content = td.querySelector('.table-cell-content');
-      return !!content && content.textContent.trim() === rowAnchorText;
-    });
-    if (!anchorCell) return false;
-    const rowId = anchorCell.getAttribute('data-row-id');
-    const rowCells = cells.filter((td) => td.getAttribute('data-row-id') === rowId);
-    const targetIndex = rowCells.indexOf(anchorCell) + columnOffset;
-    if (targetIndex < 0 || targetIndex >= rowCells.length) return false;
-    const editable = rowCells[targetIndex].querySelector('.table-cell-content');
-    if (!editable) return false;
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.selectAllChildren(editable);
-    return true;
-  })()`;
-}
+async function clearFocusedCell(
+  session: CdpSession,
+  rowId: string,
+  targetIndex: number,
+  currentLength: number,
+  sleep: (ms: number) => Promise<void>
+): Promise<void> {
+  const checkEvery = 20;
+  const maxPresses = currentLength + 50; // safety margin over the known length
+  const keyDelayMs = 40; // fired back to back with no delay, roughly half the presses were dropped
 
-/**
- * Clears whatever the target cell currently holds, selecting the whole cell (not just the
- * current visual line) before deleting, then dispatching a real Backspace so the app's own
- * input pipeline processes the delete exactly as it would for a user keypress.
- */
-async function clearFocusedCell(session: CdpSession, rowAnchorText: string, columnOffset: number): Promise<void> {
-  await session.send('Runtime.evaluate', {
-    expression: buildSelectAllInCellExpression(rowAnchorText, columnOffset),
-    returnByValue: true,
-  });
-  await dispatchKey(session, { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 });
+  const pressUntilEmpty = async (key: { key: string; code: string; windowsVirtualKeyCode: number }) => {
+    let pressed = 0;
+    while (pressed < maxPresses) {
+      const thisBatch = Math.min(checkEvery, maxPresses - pressed);
+      for (let i = 0; i < thisBatch; i++) {
+        await dispatchKey(session, key);
+        await sleep(keyDelayMs);
+      }
+      pressed += thisBatch;
+      const cell = await locateCellById(session, rowId, targetIndex);
+      if (cell.found && cell.currentText.length === 0) return true;
+    }
+    return false;
+  };
+
+  // The click that focused this cell can land anywhere in it. Backspace clears everything from
+  // that point back to the true start of the cell (a cross-cell boundary was already confirmed
+  // not to bleed into a neighbor), which handles content before the click. Delete then clears
+  // whatever was after the click point, which Backspace alone never reaches.
+  if (await pressUntilEmpty({ key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 })) return;
+  await pressUntilEmpty({ key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
 }
 
 async function clickAt(session: CdpSession, x: number, y: number): Promise<void> {
@@ -180,6 +220,15 @@ async function locateCell(
 ): Promise<CellLocatorResult> {
   const result = await session.send<{ result?: { value?: CellLocatorResult } }>('Runtime.evaluate', {
     expression: buildCellLocatorExpression(rowAnchorText, columnOffset),
+    returnByValue: true,
+  });
+  return result?.result?.value ?? { found: false, reason: 'row_not_found' };
+}
+
+/** Re-locate by stable row/column identity, see `buildCellLocatorByIdExpression`. */
+async function locateCellById(session: CdpSession, rowId: string, targetIndex: number): Promise<CellLocatorResult> {
+  const result = await session.send<{ result?: { value?: CellLocatorResult } }>('Runtime.evaluate', {
+    expression: buildCellLocatorByIdExpression(rowId, targetIndex),
     returnByValue: true,
   });
   return result?.result?.value ?? { found: false, reason: 'row_not_found' };
@@ -328,7 +377,7 @@ export async function editCanvasCell(
 
   const before = cell.currentText;
   if (before.length > 0) {
-    await clearFocusedCell(session, options.rowAnchorText, options.columnOffset);
+    await clearFocusedCell(session, cell.rowId, cell.targetIndex, before.length, sleep);
   }
   if (options.text.length > 0) {
     await session.send('Input.insertText', { text: options.text });
@@ -339,7 +388,12 @@ export async function editCanvasCell(
   // server-side before anything (including the caller closing the browser) can race it.
   await sleep(500);
 
-  const readBack = await locateCell(session, options.rowAnchorText, options.columnOffset);
+  // Re-locate by the row/column identity captured at the initial locate, not by re-matching
+  // options.rowAnchorText: when columnOffset is 0, or the anchor cell is itself the one just
+  // edited, the anchor text is exactly what changed, so text-based re-lookup can never find it
+  // again even though the edit succeeded (confirmed live: reported "cell no longer found" for a
+  // perfectly successful clear).
+  const readBack = await locateCellById(session, cell.rowId, cell.targetIndex);
   const after = readBack.found ? readBack.currentText : null;
 
   if (after !== options.text) {
