@@ -403,6 +403,20 @@ export class SlackClient {
     return this.request('conversations.info', { channel });
   }
 
+  // List the member IDs of a conversation (read-only, cursor-paginated).
+  // On an enterprise grid Slack answers conversations.members with
+  // enterprise_is_restricted regardless of team scoping; that surfaces as a
+  // "Slack API error: enterprise_is_restricted" here for the caller to degrade on.
+  async getConversationMembers(channel: string, options: {
+    cursor?: string;
+    limit?: number;
+  } = {}): Promise<any> {
+    const params: Record<string, any> = { channel };
+    if (options.cursor) params.cursor = options.cursor;
+    if (options.limit) params.limit = options.limit;
+    return this.request('conversations.members', params);
+  }
+
   // Get team (workspace) info. team.info works for both auth types. On an
   // enterprise org, an optional team (T-id) scopes the lookup to one workspace;
   // omitted, Slack returns the token's own workspace.
