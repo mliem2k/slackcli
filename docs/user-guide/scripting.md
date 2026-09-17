@@ -9,7 +9,7 @@ Every read command supports `--json`: `conversations list`, `conversations read`
 `conversations get`, `conversations unread`, `search messages`, `search channels`,
 `search people`, `saved list`, `canvas list`, `canvas read`, `team info`,
 `usergroups list`, `usergroups read`, `emoji list`, `emoji get`, `files info`,
-`files read`.
+`files read`, `users info`, `users list`.
 
 The writing commands support it too — `messages send`, `messages edit`,
 `messages draft`, and the `usergroups` write verbs (`create`, `update`, `add`,
