@@ -1,7 +1,7 @@
 ---
 name: slackcli
 description: Read, send, search, and manage Slack workspaces with the slackcli binary. Installs slackcli if missing and checks or proposes authentication first. Use whenever the user mentions Slack or pastes a slack.com link.
-argument-hint: [what to do in Slack]
+argument-hint: "[what to do in Slack]"
 ---
 
 # slackcli
