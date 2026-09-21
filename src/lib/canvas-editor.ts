@@ -63,6 +63,11 @@ interface CellFound {
 interface CellNotFound {
   found: false;
   reason: 'row_not_found' | 'column_out_of_range';
+  /** Set on a `row_not_found` that came from the search deadline passing, not from confirming
+   *  there is nothing left to reveal (the scroll container's height and mounted cell count both
+   *  stopped changing across a jump). A caller must not tell the user the whole canvas was
+   *  searched when this is true, since the row may still exist further down. */
+  timedOut?: boolean;
 }
 type CellLocatorResult = CellFound | CellNotFound;
 
@@ -252,7 +257,7 @@ async function locateCellById(session: CdpSession, rowId: string, targetIndex: n
 }
 
 /**
- * Scroll the canvas's own inner scroll container down by roughly a viewport height.
+ * Jump the canvas's own inner scroll container straight to its current bottom.
  *
  * The canvas virtualizes its content: a long document (this Sprint canvas runs to hundreds of
  * table cells) only mounts rows into the DOM near the current scroll position, confirmed live,
@@ -260,13 +265,23 @@ async function locateCellById(session: CdpSession, rowId: string, targetIndex: n
  * it. `window.scrollBy` does nothing here, the actual scrollable element is an inner
  * `div.parts-screen-body.scrollable`-style container, found generically (largest element whose
  * content overflows its own box) rather than hardcoding that class name, since it is an
- * implementation detail of Slack's own app, not a public contract.
+ * implementation detail of Slack's own app, not a public contract; confirmed correct by walking
+ * up from a real `td.table-cell` to its nearest scrollable ancestor, there is exactly one.
+ *
+ * Nudging that container by a small increment (roughly a viewport height, repeated) never mounts
+ * anything, confirmed live: 8 such steps with a full 1500ms settle after each one, well over 2000px
+ * of real cumulative scrollTop movement, still left the cell count at its initial value. This is
+ * not windowed virtualization reacting to proximity; it is a single large reveal triggered only by
+ * reaching the container's true scroll boundary. Jumping straight to `scrollHeight - clientHeight`
+ * does mount a large batch (confirmed live: 32 cells to 233 in one jump), and since previously
+ * unmeasured content becomes real, measured content once mounted, `scrollHeight` itself can change
+ * after a jump, so the caller repeats the jump against the fresh value until it stops changing.
  */
 export const SCROLL_CONTAINER_STEP_EXPRESSION = `(() => {
   const candidates = Array.from(document.querySelectorAll('*')).filter(
     (el) => el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 200
   );
-  if (candidates.length === 0) return { scrolled: false, atBottom: true };
+  if (candidates.length === 0) return { found: false };
   // Pick the candidate with the largest actual overflow, not just the first DOM match: the page
   // carries several small scrollable widgets (a table-of-contents drawer, a scrollbar wrapper)
   // that also pass the filter above but scroll almost nothing, confirmed live on the real canvas.
@@ -274,19 +289,38 @@ export const SCROLL_CONTAINER_STEP_EXPRESSION = `(() => {
   const container = candidates.reduce((best, el) =>
     (el.scrollHeight - el.clientHeight) > (best.scrollHeight - best.clientHeight) ? el : best
   );
-  const before = container.scrollTop;
-  container.scrollBy(0, container.clientHeight * 0.9);
-  const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
-  return { scrolled: container.scrollTop > before, atBottom };
+  const scrollHeightBeforeJump = container.scrollHeight;
+  container.scrollTop = container.scrollHeight - container.clientHeight;
+  // A native scrollTop assignment does not itself bubble, but that only matters for listeners on
+  // an ANCESTOR of the container; this dispatch is aimed at the container itself, which receives
+  // it regardless of bubbling. Kept anyway since it costs nothing and covers a listener elsewhere.
+  container.dispatchEvent(new Event('scroll', { bubbles: true }));
+  // Cell count alongside scrollHeight: a mount batch whose real measured height happens to equal
+  // the placeholder it replaced would leave scrollHeight unchanged even though content mounted, a
+  // single-line-row table (this one) is exactly the shape a virtualizer estimates accurately. Cell
+  // count cannot be fooled the same way, it is what the 32-to-233 reveal was actually measured by.
+  const cellCount = document.querySelectorAll('td.table-cell').length;
+  return { found: true, scrollHeightBeforeJump, cellCount };
 })()`;
+
+type ScrollStep =
+  | { found: false }
+  | { found: true; scrollHeightBeforeJump: number; cellCount: number };
 
 /**
  * Locate a cell in a virtualized canvas by scrolling down until it mounts into the DOM.
  *
  * Tries the locator first (covers the case where the target row is already on screen), then
- * alternates scroll-step and re-locate until found, a definitive column_out_of_range (more
- * scrolling cannot fix that), the container reports it has reached the bottom, or the deadline
- * passes.
+ * alternates bottom-jump and re-locate until found, a definitive column_out_of_range (more
+ * scrolling cannot fix that), no scrollable container exists at all, the jumps stop revealing
+ * anything new, or the deadline passes. "Stops revealing anything new" is two consecutive jumps
+ * measuring the same pre-jump scrollHeight AND the same mounted cell count: scrollHeight alone can
+ * stay put across a real reveal if a mount batch's measured height happens to equal the placeholder
+ * it replaced, so both signals have to agree before giving up. The container cannot report being at
+ * its own true bottom either way, since each reveal can grow or shrink the number that would define
+ * it. Once both signals agree nothing changed, one further locate is still made (using the DOM the
+ * last jump's settle window already paid for) before concluding the row genuinely is not there,
+ * distinct from a deadline cutoff, which the caller must not describe as a completed search.
  *
  * `occurrence` (1-indexed, default 1) picks the Nth cell matching `rowAnchorText` in top-to-
  * bottom document order, not just the first. A short cell value (a name, a role, a status word)
@@ -294,8 +328,9 @@ export const SCROLL_CONTAINER_STEP_EXPRESSION = `(() => {
  * stand-up template, in the case this was built for), so always taking the first match risks
  * silently editing the wrong row's real data instead of the intended one. Matches already passed
  * over (found, but not yet the target occurrence) are tracked by their stable `rowId` in
- * `excludeRowIds` so they are skipped on every subsequent locate call, including after scrolling
- * remounts them, they are never revisited or double-counted.
+ * `excludeRowIds` so they are skipped on every subsequent locate call. This assumes a row's
+ * `data-row-id` survives being unmounted and remounted by a later jump, true of every jump
+ * observed live so far, not independently verified against Quip's own internals.
  */
 async function locateCellByScrolling(
   session: CdpSession,
@@ -308,8 +343,18 @@ async function locateCellByScrolling(
   const deadline = Date.now() + timeoutMs;
   const excludeRowIds: string[] = [];
   let matchesSeen = 0;
+  // Tracks the previous jump's readings, so a jump that reveals nothing new (both readings
+  // unchanged from last time) is recognized as "truly at the bottom" rather than retried forever;
+  // -1 never matches a real reading, so the first jump always proceeds.
+  let previousScrollHeight = -1;
+  let previousCellCount = -1;
+  let stabilized = false;
   let last: CellLocatorResult = { found: false, reason: 'row_not_found' };
   while (true) {
+    if (Date.now() >= deadline) {
+      return last.found ? last : { ...last, timedOut: !stabilized };
+    }
+
     last = await locateCell(session, rowAnchorText, columnOffset, excludeRowIds);
     if (last.found) {
       matchesSeen += 1;
@@ -320,15 +365,24 @@ async function locateCellByScrolling(
       continue;
     }
     if (last.reason === 'column_out_of_range') return last;
-    if (Date.now() >= deadline) return last;
+    // The previous jump's settle window already produced this locate's DOM; if it also confirmed
+    // stabilization, this miss is a genuine, fully-searched absence, not one more thing to retry.
+    if (stabilized) return last;
 
-    const scrollResult = await session.send<{ result?: { value?: { scrolled: boolean; atBottom: boolean } } }>(
-      'Runtime.evaluate',
-      { expression: SCROLL_CONTAINER_STEP_EXPRESSION, returnByValue: true }
-    );
-    const { scrolled, atBottom } = scrollResult?.result?.value ?? { scrolled: false, atBottom: true };
-    await sleep(300); // let virtualized rows mount before the next locate attempt
-    if (!scrolled && atBottom) return last;
+    const scrollResult = await session.send<{ result?: { value?: ScrollStep } }>('Runtime.evaluate', {
+      expression: SCROLL_CONTAINER_STEP_EXPRESSION,
+      returnByValue: true,
+    });
+    const step = scrollResult?.result?.value ?? { found: false };
+    if (!step.found) return last; // no scrollable container at all
+    // Quip mounts more content in one large batch only once the container actually reaches its
+    // scroll boundary, not incrementally as the boundary is approached; shorter settle windows
+    // after the jump were tried live and the batch had not landed yet, so 1500ms is empirical, not
+    // an arbitrary round number.
+    await sleep(1500);
+    stabilized = step.scrollHeightBeforeJump === previousScrollHeight && step.cellCount === previousCellCount;
+    previousScrollHeight = step.scrollHeightBeforeJump;
+    previousCellCount = step.cellCount;
   }
 }
 
@@ -346,27 +400,43 @@ export async function editCanvasCell(
 ): Promise<CanvasEditCellResult> {
   const sleep = options.sleep ?? defaultSleep;
   const loadTimeoutMs = options.loadTimeoutMs ?? 20_000;
-  const saveTimeoutMs = options.saveTimeoutMs ?? 8_000;
+  // Confirmed live: the debounced save this now waits for (one sent no earlier than the final
+  // edit, see finalInputAt below) can take well over 8s to fire on a long clear/replace, so the
+  // old 8s default produced real false negatives (edit correctly persisted, reported as unsaved).
+  const saveTimeoutMs = options.saveTimeoutMs ?? 15_000;
 
   // A save request being sent is not the same property as it succeeding: Slack's autosave is
   // debounced, and the response can be a non-2xx (e.g. a version conflict) with no visible
   // effect other than the edit silently not persisting. Track the response status of each
   // edit-document request by id, not just whether one was dispatched.
+  //
+  // The debounce also fires WHILE clearing, not only after the final text lands: confirmed live,
+  // a long clear/replace reliably produces an early save request mid-Backspace that captures a
+  // partially-cleared, intermediate snapshot, with its 2xx response arriving well before the
+  // clear or the later Input.insertText even finish. A check that accepts the first save response
+  // it ever sees is satisfied by that stale one, so the function reports success (the DOM readback
+  // below is genuinely correct at that moment) while what actually persists server-side is the
+  // intermediate text, not the final replacement, the exact shape of corruption this was written
+  // to catch: a clean front truncation with the untouched tail of the old value left behind. The
+  // fix is to require a save REQUEST sent no earlier than the final DOM mutation (`finalInputAt`,
+  // set below), correlated to ITS OWN response by request id, not just "some response arrived".
   const saveRequestIds = new Set<string>();
-  let saveResponseStatus: number | null = null;
+  const saveResponsesByRequestId = new Map<string, number>();
+  let lastSaveRequestId: string | null = null;
+  let lastSaveRequestSentAt: number | null = null;
   session.on('Network.requestWillBeSent', (params: any) => {
     const url = params?.request?.url;
     if (typeof url === 'string' && url.includes('/canvas/-/edit-document') && typeof params?.requestId === 'string') {
       saveRequestIds.add(params.requestId);
+      lastSaveRequestId = params.requestId;
+      lastSaveRequestSentAt = Date.now();
     }
   });
   session.on('Network.responseReceived', (params: any) => {
     if (typeof params?.requestId === 'string' && saveRequestIds.has(params.requestId)) {
       const status = params?.response?.status;
       if (typeof status === 'number') {
-        // Keep the latest: typing that continues past the first debounce can produce more than
-        // one save request, and the last one is the one that matters.
-        saveResponseStatus = status;
+        saveResponsesByRequestId.set(params.requestId, status);
       }
     }
   });
@@ -413,14 +483,20 @@ export async function editCanvasCell(
     occurrence
   );
   if (!cell.found) {
+    // "Scrolled to the bottom" is only true once the search actually confirmed nothing more could
+    // be revealed; a search that instead ran out of time may have stopped well short of the real
+    // bottom, and telling the caller otherwise sends them looking for a row that may well exist.
+    const searchDescription = cell.reason === 'row_not_found' && cell.timedOut
+      ? 'ran out of time scrolling through the canvas before confirming the whole document had been searched'
+      : 'scrolled to the bottom of the canvas';
     return {
       ok: false,
       reason: cell.reason,
       message:
         cell.reason === 'row_not_found'
           ? occurrence > 1
-            ? `Found fewer than ${occurrence} cells with the exact text "${options.rowAnchorText}" (scrolled to the bottom of the canvas looking for occurrence ${occurrence}).`
-            : `No cell in the canvas contains the exact text "${options.rowAnchorText}", scrolled to the bottom looking for it.`
+            ? `Found fewer than ${occurrence} cells with the exact text "${options.rowAnchorText}" (${searchDescription} looking for occurrence ${occurrence}).`
+            : `No cell in the canvas contains the exact text "${options.rowAnchorText}", ${searchDescription} looking for it.`
           : `Found ${occurrence > 1 ? `occurrence ${occurrence} of ` : 'the row for '}"${options.rowAnchorText}", but column offset ${options.columnOffset} is out of range for it.`,
     };
   }
@@ -435,11 +511,26 @@ export async function editCanvasCell(
   if (options.text.length > 0) {
     await session.send('Input.insertText', { text: options.text });
   }
+  // Any save request sent before this point may only reflect an intermediate state from clearing,
+  // never the final text; only a request sent at or after this instant is evidence of anything.
+  const finalInputAt = Date.now();
 
-  await waitFor(() => saveResponseStatus !== null, saveTimeoutMs, sleep);
+  await waitFor(
+    () =>
+      lastSaveRequestSentAt !== null &&
+      lastSaveRequestSentAt >= finalInputAt &&
+      lastSaveRequestId !== null &&
+      saveResponsesByRequestId.has(lastSaveRequestId),
+    saveTimeoutMs,
+    sleep
+  );
   // Give a save response that arrives right at the deadline a moment to actually be processed
   // server-side before anything (including the caller closing the browser) can race it.
   await sleep(500);
+  const saveResponseStatus =
+    lastSaveRequestSentAt !== null && lastSaveRequestSentAt >= finalInputAt && lastSaveRequestId !== null
+      ? saveResponsesByRequestId.get(lastSaveRequestId) ?? null
+      : null;
 
   // Re-locate by the row/column identity captured at the initial locate, not by re-matching
   // options.rowAnchorText: when columnOffset is 0, or the anchor cell is itself the one just
