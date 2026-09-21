@@ -34,6 +34,11 @@ export interface CanvasEditCellOptions {
   canvasUrl: string;
   /** Exact text of an existing cell that identifies the target row. */
   rowAnchorText: string;
+  /** Which match to use when rowAnchorText is not unique in the document: 1-indexed, in
+   *  top-to-bottom scroll order. Defaults to 1 (the first match). A long canvas commonly repeats
+   *  the same short cell value (a name, a role) across several unrelated tables, so relying on
+   *  the first match alone risks silently editing the wrong row. */
+  occurrence?: number;
   /** Cells to the right of the anchor cell within its row, 0 edits the anchor cell itself. */
   columnOffset: number;
   /** Replacement text. Empty string clears the cell. */
@@ -70,15 +75,26 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
  * Matches the real canvas table markup: `td.table-cell[data-row-id]` wraps a
  * `.table-cell-content[contenteditable]` div holding the cell's text,
  * confirmed by walking the live DOM, not guessed.
+ *
+ * `excludeRowIds` skips rows already ruled out (already matched and confirmed not to be the
+ * target occurrence, or already edited by an earlier step of the same operation), so the caller
+ * can walk forward through repeated matches one at a time rather than always landing on the
+ * first. See `locateCellByScrolling`'s `occurrence` parameter, the actual disambiguation logic.
  */
-export function buildCellLocatorExpression(rowAnchorText: string, columnOffset: number): string {
+export function buildCellLocatorExpression(
+  rowAnchorText: string,
+  columnOffset: number,
+  excludeRowIds: string[] = []
+): string {
   return `(() => {
     const rowAnchorText = ${JSON.stringify(rowAnchorText)};
     const columnOffset = ${JSON.stringify(columnOffset)};
+    const excludeRowIds = new Set(${JSON.stringify(excludeRowIds)});
     const cells = Array.from(document.querySelectorAll('td.table-cell'));
     const anchorCell = cells.find((td) => {
       const content = td.querySelector('.table-cell-content');
-      return !!content && content.textContent.trim() === rowAnchorText;
+      if (!content || content.textContent.trim() !== rowAnchorText) return false;
+      return !excludeRowIds.has(td.getAttribute('data-row-id'));
     });
     if (!anchorCell) return { found: false, reason: 'row_not_found' };
     const rowId = anchorCell.getAttribute('data-row-id');
@@ -216,10 +232,11 @@ async function waitFor(
 async function locateCell(
   session: CdpSession,
   rowAnchorText: string,
-  columnOffset: number
+  columnOffset: number,
+  excludeRowIds: string[] = []
 ): Promise<CellLocatorResult> {
   const result = await session.send<{ result?: { value?: CellLocatorResult } }>('Runtime.evaluate', {
-    expression: buildCellLocatorExpression(rowAnchorText, columnOffset),
+    expression: buildCellLocatorExpression(rowAnchorText, columnOffset, excludeRowIds),
     returnByValue: true,
   });
   return result?.result?.value ?? { found: false, reason: 'row_not_found' };
@@ -264,19 +281,39 @@ const SCROLL_CONTAINER_STEP_EXPRESSION = `(() => {
  * alternates scroll-step and re-locate until found, a definitive column_out_of_range (more
  * scrolling cannot fix that), the container reports it has reached the bottom, or the deadline
  * passes.
+ *
+ * `occurrence` (1-indexed, default 1) picks the Nth cell matching `rowAnchorText` in top-to-
+ * bottom document order, not just the first. A short cell value (a name, a role, a status word)
+ * commonly repeats across unrelated tables in one long canvas (multiple weeks of the same
+ * stand-up template, in the case this was built for), so always taking the first match risks
+ * silently editing the wrong row's real data instead of the intended one. Matches already passed
+ * over (found, but not yet the target occurrence) are tracked by their stable `rowId` in
+ * `excludeRowIds` so they are skipped on every subsequent locate call, including after scrolling
+ * remounts them, they are never revisited or double-counted.
  */
 async function locateCellByScrolling(
   session: CdpSession,
   rowAnchorText: string,
   columnOffset: number,
   timeoutMs: number,
-  sleep: (ms: number) => Promise<void>
+  sleep: (ms: number) => Promise<void>,
+  occurrence: number = 1
 ): Promise<CellLocatorResult> {
   const deadline = Date.now() + timeoutMs;
+  const excludeRowIds: string[] = [];
+  let matchesSeen = 0;
   let last: CellLocatorResult = { found: false, reason: 'row_not_found' };
   while (true) {
-    last = await locateCell(session, rowAnchorText, columnOffset);
-    if (last.found || last.reason === 'column_out_of_range') return last;
+    last = await locateCell(session, rowAnchorText, columnOffset, excludeRowIds);
+    if (last.found) {
+      matchesSeen += 1;
+      if (matchesSeen >= occurrence) return last;
+      // Not the occurrence we want: rule this row out and keep looking, without scrolling first,
+      // in case another match is already mounted alongside this one in the current DOM.
+      excludeRowIds.push(last.rowId);
+      continue;
+    }
+    if (last.reason === 'column_out_of_range') return last;
     if (Date.now() >= deadline) return last;
 
     const scrollResult = await session.send<{ result?: { value?: { scrolled: boolean; atBottom: boolean } } }>(
@@ -360,15 +397,25 @@ export async function editCanvasCell(
     };
   }
 
-  const cell = await locateCellByScrolling(session, options.rowAnchorText, options.columnOffset, loadTimeoutMs, sleep);
+  const occurrence = options.occurrence ?? 1;
+  const cell = await locateCellByScrolling(
+    session,
+    options.rowAnchorText,
+    options.columnOffset,
+    loadTimeoutMs,
+    sleep,
+    occurrence
+  );
   if (!cell.found) {
     return {
       ok: false,
       reason: cell.reason,
       message:
         cell.reason === 'row_not_found'
-          ? `No cell in the canvas contains the exact text "${options.rowAnchorText}", scrolled to the bottom looking for it.`
-          : `Found the row for "${options.rowAnchorText}", but column offset ${options.columnOffset} is out of range for it.`,
+          ? occurrence > 1
+            ? `Found fewer than ${occurrence} cells with the exact text "${options.rowAnchorText}" (scrolled to the bottom of the canvas looking for occurrence ${occurrence}).`
+            : `No cell in the canvas contains the exact text "${options.rowAnchorText}", scrolled to the bottom looking for it.`
+          : `Found ${occurrence > 1 ? `occurrence ${occurrence} of ` : 'the row for '}"${options.rowAnchorText}", but column offset ${options.columnOffset} is out of range for it.`,
     };
   }
 

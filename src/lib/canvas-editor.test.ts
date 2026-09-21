@@ -72,6 +72,49 @@ describe('buildCellLocatorExpression', () => {
   });
 });
 
+// --- excludeRowIds, the disambiguation primitive occurrence support is built on ---
+// A short cell value (a name, a role) commonly repeats across unrelated tables in one long
+// canvas; without this, the locator always returns the first match, silently pointing an edit
+// at the wrong row.
+
+describe('buildCellLocatorExpression with excludeRowIds', () => {
+  const row1 = [makeFakeTd('row_1', 'Michael'), makeFakeTd('row_1', 'Old work')];
+  const row2 = [makeFakeTd('row_2', 'Michael'), makeFakeTd('row_2', 'New work')];
+  const table = [...row1, ...row2];
+
+  function locateExcluding(rowAnchorText: string, columnOffset: number, tds: unknown[], excludeRowIds: string[]): any {
+    const fakeDocument = { querySelectorAll: (sel: string) => (sel === 'td.table-cell' ? tds : []) };
+    const expression = buildCellLocatorExpression(rowAnchorText, columnOffset, excludeRowIds);
+    const fn = new Function('document', `return ${expression};`);
+    return fn(fakeDocument);
+  }
+
+  it('returns the first match when nothing is excluded', () => {
+    const result = locateExcluding('Michael', 1, table, []);
+    expect(result.found).toBe(true);
+    expect(result.currentText).toBe('Old work');
+    expect(result.rowId).toBe('row_1');
+  });
+
+  it('skips an excluded row and returns the next match', () => {
+    const result = locateExcluding('Michael', 1, table, ['row_1']);
+    expect(result.found).toBe(true);
+    expect(result.currentText).toBe('New work');
+    expect(result.rowId).toBe('row_2');
+  });
+
+  it('reports row_not_found once every matching row is excluded', () => {
+    const result = locateExcluding('Michael', 1, table, ['row_1', 'row_2']);
+    expect(result).toEqual({ found: false, reason: 'row_not_found' });
+  });
+
+  it('excluding an unrelated rowId does not affect the match', () => {
+    const result = locateExcluding('Michael', 1, table, ['row_does_not_exist']);
+    expect(result.found).toBe(true);
+    expect(result.rowId).toBe('row_1');
+  });
+});
+
 // --- editCanvasCell orchestration, against a fake CdpSession ---
 
 interface FakeOptions {
@@ -443,6 +486,83 @@ describe('editCanvasCell', () => {
     if (!result.ok) {
       expect(result.reason).toBe('save_not_confirmed');
       expect(result.message).toContain('409');
+    }
+  });
+
+  it('edits the second occurrence of a repeated anchor, not the first', async () => {
+    // Reproduces the real hazard this option exists for: "Michael" matching an already-filled
+    // historical row before the intended blank one further down the same canvas. Without
+    // occurrence support, this would click and clear row_1's real content instead of row_2's.
+    const { session, calls } = makeFakeSession({
+      locatorResults: [
+        { found: true, x: 5, y: 5, currentText: 'Old work', rowId: 'row_1', targetIndex: 1 } as any,
+        { found: true, x: 10, y: 20, currentText: 'New work', rowId: 'row_2', targetIndex: 1 } as any,
+        { found: true, x: 10, y: 20, currentText: 'Done', rowId: 'row_2', targetIndex: 1 } as any,
+      ],
+      fireSaveRequestOnClick: true,
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Michael',
+      occurrence: 2,
+      columnOffset: 1,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    expect(result).toEqual({ ok: true, before: 'New work', after: 'Done' });
+    // The click must land on the second occurrence's coordinates, never the first's, proof the
+    // skipped-over row was never touched.
+    const click = calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params?.type === 'mousePressed');
+    expect(click?.params).toMatchObject({ x: 10, y: 20 });
+  });
+
+  it('defaults to occurrence 1 (the first match) when occurrence is not specified', async () => {
+    const { session, calls } = makeFakeSession({
+      locatorResults: [
+        { found: true, x: 5, y: 5, currentText: 'Old work' },
+        { found: true, x: 5, y: 5, currentText: 'Done' },
+      ],
+      fireSaveRequestOnClick: true,
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Michael',
+      columnOffset: 1,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    expect(result).toEqual({ ok: true, before: 'Old work', after: 'Done' });
+    const click = calls.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params?.type === 'mousePressed');
+    expect(click?.params).toMatchObject({ x: 5, y: 5 });
+  });
+
+  it('fails with row_not_found, and names the occurrence, when fewer matches exist than requested', async () => {
+    const { session } = makeFakeSession({
+      locatorResults: [
+        { found: true, x: 5, y: 5, currentText: 'Old work', rowId: 'row_1', targetIndex: 1 } as any,
+        { found: true, x: 10, y: 20, currentText: 'New work', rowId: 'row_2', targetIndex: 1 } as any,
+        { found: false, reason: 'row_not_found' },
+      ],
+      scrollStepsBeforeBottom: 1, // already at the bottom by the time the third locate comes up empty
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Michael',
+      occurrence: 3,
+      columnOffset: 1,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('row_not_found');
+      expect(result.message).toContain('occurrence 3');
     }
   });
 

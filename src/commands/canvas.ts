@@ -302,6 +302,11 @@ export function createCanvasCommand(): Command {
     .description('Edit one table cell in a canvas by driving a real browser (for workspaces where canvases.edit is blocked)')
     .argument('<canvas-id>', 'Canvas file ID (e.g., F1234567890)')
     .requiredOption('--row-anchor <text>', 'Exact text of an existing cell that identifies the target row')
+    .option(
+      '--occurrence <n>',
+      'Which match to use when --row-anchor text is not unique in the canvas, 1-indexed in top-to-bottom document order (default: 1, the first match). Run "canvas sections --contains-text" first to check how many matches exist before assuming 1 is correct.',
+      '1'
+    )
     .requiredOption('--column-offset <n>', 'Cells to the right of the anchor cell to edit (0 edits the anchor cell itself)')
     .requiredOption('--text <text>', 'Replacement text for the target cell (pass "" to clear it)')
     .option('--headless', 'Run without a visible browser window (only works if already signed in)')
@@ -324,6 +329,13 @@ export function createCanvasCommand(): Command {
           process.exit(1);
         }
 
+        const occurrence = parseInt(options.occurrence, 10);
+        if (!Number.isFinite(occurrence) || String(occurrence) !== options.occurrence.trim() || occurrence < 1) {
+          spinner.fail('Invalid --occurrence');
+          error('--occurrence must be a positive integer (1 = the first match).');
+          process.exit(1);
+        }
+
         const workspace = await getWorkspace(options.workspace);
         if (!workspace) {
           spinner.fail('No workspace configured');
@@ -338,7 +350,7 @@ export function createCanvasCommand(): Command {
         const canvasUrl = `https://app.slack.com/client/${workspace.workspace_id}/unified-files/doc/${canvasId}`;
 
         const result = await editCanvasCellAuto(
-          { canvasUrl, rowAnchorText: options.rowAnchor, columnOffset, text: options.text },
+          { canvasUrl, rowAnchorText: options.rowAnchor, occurrence, columnOffset, text: options.text },
           { headless: options.headless === true }
         );
 
