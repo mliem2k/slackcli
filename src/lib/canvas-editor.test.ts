@@ -75,11 +75,34 @@ describe('buildCellLocatorExpression', () => {
   });
 });
 
-// --- multi-line cells: sibling <p class="line"> elements, not embedded \n in .textContent ---
-// A real multi-line cell in this editor is N separate <p> children; plain .textContent
-// concatenates them with no separator at all, which silently drops every line break on readback.
+// --- multi-line cells: two different DOM shapes hold a cell's lines depending on whether it is
+// currently focused for editing, and plain .textContent concatenates either one's children with
+// no separator at all, silently dropping every line break on readback ---
+//
+// At rest (never clicked into), a multi-line cell renders each line as a sibling <p class="line">.
+// The moment it is focused for editing, confirmed live via a diagnostic script instrumenting the
+// real DOM after each step, it re-renders into a different shape instead: each line becomes its
+// own sibling .section, and each .section wraps exactly one .content div holding that line's text
+// (true even for a single-line cell, which still gets wrapped in one .section > .content once
+// focused). A readback taken right after an edit is checking a cell that is still focused, so it
+// needs the .section shape, not <p>; an earlier version of this checked only 'p', always found
+// zero elements on a just-edited cell, and silently fell back to the run-on .textContent.
 
-function makeFakeMultiLineTd(rowId: string, lines: string[]) {
+function makeFakeSectionTd(rowId: string, lines: string[]) {
+  const sectionContents = lines.map((text) => ({ textContent: text }));
+  const editable = {
+    textContent: lines.join(''), // what plain .textContent would report, no separator
+    querySelectorAll: (sel: string) => (sel === ':scope > .section > .content' ? sectionContents : []),
+    scrollIntoView: () => {},
+    getBoundingClientRect: () => ({ left: 100, top: 200, width: 50, height: 20 }),
+  };
+  return {
+    getAttribute: (name: string) => (name === 'data-row-id' ? rowId : null),
+    querySelector: (sel: string) => (sel === '.table-cell-content' ? editable : null),
+  };
+}
+
+function makeFakeParagraphTd(rowId: string, lines: string[]) {
   const paragraphs = lines.map((text) => ({ textContent: text }));
   const editable = {
     textContent: lines.join(''), // what plain .textContent would report, no separator
@@ -94,10 +117,20 @@ function makeFakeMultiLineTd(rowId: string, lines: string[]) {
 }
 
 describe('buildCellLocatorExpression with multi-line cells', () => {
-  it('joins sibling <p> lines with a newline instead of the .textContent run-on', () => {
+  it('joins sibling .section > .content lines with a newline (the focused/editing shape)', () => {
     const table = [
       makeFakeTd('row_1', 'Michael'),
-      makeFakeMultiLineTd('row_1', ['fix: [F22-6659] one thing', 'fix: [F22-6531] another thing']),
+      makeFakeSectionTd('row_1', ['fix: [F22-6659] one thing', 'fix: [F22-6531] another thing']),
+    ];
+    const result = locate('Michael', 1, table);
+    expect(result.found).toBe(true);
+    expect(result.currentText).toBe('fix: [F22-6659] one thing\nfix: [F22-6531] another thing');
+  });
+
+  it('joins sibling <p> lines with a newline (the at-rest/unfocused shape)', () => {
+    const table = [
+      makeFakeTd('row_1', 'Michael'),
+      makeFakeParagraphTd('row_1', ['fix: [F22-6659] one thing', 'fix: [F22-6531] another thing']),
     ];
     const result = locate('Michael', 1, table);
     expect(result.found).toBe(true);
@@ -106,7 +139,7 @@ describe('buildCellLocatorExpression with multi-line cells', () => {
 
   it('matches a row-anchor against the newline-joined text, not the run-on .textContent', () => {
     const table = [
-      makeFakeMultiLineTd('row_1', ['Last workday', 'Today\'s plan']),
+      makeFakeSectionTd('row_1', ['Last workday', 'Today\'s plan']),
       makeFakeTd('row_1', 'Tue'),
     ];
     const result = locate("Last workday\nToday's plan", 1, table);
