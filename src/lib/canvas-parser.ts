@@ -29,6 +29,27 @@ export function isAuthPage(html: string): boolean {
   return /<form[^>]*signin|data-qa="signin|<title>[^<]*Sign\s*in/i.test(html);
 }
 
+/**
+ * Whether a canvas edit's replacement text can be found in freshly re-fetched canvas markdown,
+ * the confirmation check `canvas edit-cell` uses to verify a save actually persisted rather than
+ * only appearing to in the browser. A table cell is one GFM line by construction
+ * (`convertCellContent` below), so a multi-line replacement's embedded newlines never survive the
+ * round trip verbatim, confirmed live: they come back collapsed to roughly a single space. A raw
+ * substring check on such a value then reports "not persisted" forever, even for a fully
+ * successful save. Whitespace runs are collapsed to a single space on both sides before comparing
+ * so the check reflects content, not incidental spacing.
+ *
+ * Clearing a cell to empty text has no positive value to search for, so the signal there is the
+ * opposite: the cell's own prior content, `before`, must no longer appear anywhere in the doc
+ * (assumes `before` was specific enough not to appear elsewhere in the document, true for every
+ * real use so far).
+ */
+export function canvasEditPersisted(markdown: string, text: string, before: string): boolean {
+  const normalizeWhitespace = (s: string) => s.replace(/\s+/g, ' ').trim();
+  if (text === '') return before.length === 0 || !markdown.includes(before);
+  return normalizeWhitespace(markdown).includes(normalizeWhitespace(text));
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline steps
 // ---------------------------------------------------------------------------

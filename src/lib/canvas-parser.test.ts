@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { canvasHtmlToMarkdown, isAuthPage } from './canvas-parser.ts';
+import { canvasHtmlToMarkdown, isAuthPage, canvasEditPersisted } from './canvas-parser.ts';
 
 // ---------------------------------------------------------------------------
 // Fixtures — based on real Slack Canvas HTML exports
@@ -431,5 +431,43 @@ describe('isAuthPage', () => {
   it('should not flag normal canvas content', () => {
     expect(isAuthPage(FULL_DOCUMENT)).toBe(false);
     expect(isAuthPage('<h1>Canvas Title</h1>')).toBe(false);
+  });
+});
+
+describe('canvasEditPersisted', () => {
+  it('matches a single-line value that appears verbatim', () => {
+    const markdown = '| Role | Name |\n| --- | --- |\n| FS | Working on F22-6659 |\n';
+    expect(canvasEditPersisted(markdown, 'Working on F22-6659', '')).toBe(true);
+  });
+
+  it('matches a multi-line --text value whose embedded newlines are collapsed by convertCellContent', () => {
+    // Reproduces a real live bug: a table cell is one GFM line by construction, so
+    // canvasHtmlToMarkdown's convertCellContent unwraps a multi-line cell's paragraph boundaries
+    // without reinserting a newline. A save that genuinely persisted therefore comes back with
+    // each "\n" in the original --text collapsed to roughly a single space, confirmed live.
+    const text = "Today's Plan\n- fix: [F22-6659] resolve the duplication\n- Send the review request";
+    const markdown =
+      "| FS (PT) | Michael | Today's Plan - fix: [F22-6659] resolve the duplication - Send the review request |  |\n";
+    expect(canvasEditPersisted(markdown, text, '')).toBe(true);
+  });
+
+  it('does not match when the persisted content genuinely differs', () => {
+    const markdown = '| FS (PT) | Michael | Some unrelated content |  |\n';
+    expect(canvasEditPersisted(markdown, "Today's Plan\n- fix: [F22-6659]", '')).toBe(false);
+  });
+
+  it('treats the old content vanishing as confirmation when clearing to empty', () => {
+    const markdown = '| FS (PT) | Michael |  |  |\n';
+    expect(canvasEditPersisted(markdown, '', 'Old content')).toBe(true);
+  });
+
+  it('does not confirm a clear when the old content is still present', () => {
+    const markdown = '| FS (PT) | Michael | Old content |  |\n';
+    expect(canvasEditPersisted(markdown, '', 'Old content')).toBe(false);
+  });
+
+  it('clearing an already-empty cell has no prior content to look for, so it confirms trivially', () => {
+    const markdown = '| FS (PT) | Michael |  |  |\n';
+    expect(canvasEditPersisted(markdown, '', '')).toBe(true);
   });
 });

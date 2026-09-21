@@ -5,7 +5,7 @@ import { getAuthenticatedClient } from '../lib/auth.ts';
 import { getWorkspace } from '../lib/workspaces.ts';
 import { editCanvasCellAuto } from '../lib/canvas-editor.ts';
 import { error, success, formatCanvasList, formatCanvasContent, warning, writeJson } from '../lib/formatter.ts';
-import { canvasHtmlToMarkdown } from '../lib/canvas-parser.ts';
+import { canvasHtmlToMarkdown, canvasEditPersisted } from '../lib/canvas-parser.ts';
 import {
   applyCanvasMentions,
   CanvasReadError,
@@ -18,6 +18,7 @@ import type { SlackClient } from '../lib/slack-client.ts';
 import type { SlackCanvas, CanvasEditChange } from '../types/index.ts';
 
 const CANVAS_ID_PATTERN = /^F[A-Z0-9]+$/i;
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const EDIT_OPERATIONS = ['insert_after', 'insert_before', 'insert_at_start', 'insert_at_end', 'replace', 'delete'] as const;
 type EditOperation = typeof EDIT_OPERATIONS[number];
 
@@ -378,11 +379,7 @@ export function createCanvasCommand(): Command {
             if (!downloadUrl) continue;
             const html = await client.downloadFile(downloadUrl, MAX_FILE_SIZE);
             const markdown = canvasHtmlToMarkdown(html);
-            // Clearing to empty has no positive text to search for; the closest verifiable
-            // signal is that the old content is actually gone (assumes `before` was specific
-            // enough not to appear elsewhere in the doc, true for every real use so far).
-            const matches =
-              options.text === '' ? result.before.length === 0 || !markdown.includes(result.before) : markdown.includes(options.text);
+            const matches = canvasEditPersisted(markdown, options.text, result.before);
             if (matches) {
               persisted = true;
               break;
