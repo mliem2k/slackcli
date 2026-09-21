@@ -9,6 +9,9 @@ import type { CdpSession } from './cdp-client';
 function makeFakeTd(rowId: string, text: string) {
   const editable = {
     textContent: text,
+    // No <p class="line"> children: a plain single-line cell, matching every existing fixture
+    // here. cellText() falls back to .textContent whenever this returns 0 or 1 results.
+    querySelectorAll: (_sel: string) => [],
     scrollIntoView: () => {},
     getBoundingClientRect: () => ({ left: 100, top: 200, width: 50, height: 20 }),
   };
@@ -69,6 +72,46 @@ describe('buildCellLocatorExpression', () => {
   it('reports column_out_of_range before the start of the row', () => {
     const result = locate('Michael', -1, table);
     expect(result).toEqual({ found: false, reason: 'column_out_of_range' });
+  });
+});
+
+// --- multi-line cells: sibling <p class="line"> elements, not embedded \n in .textContent ---
+// A real multi-line cell in this editor is N separate <p> children; plain .textContent
+// concatenates them with no separator at all, which silently drops every line break on readback.
+
+function makeFakeMultiLineTd(rowId: string, lines: string[]) {
+  const paragraphs = lines.map((text) => ({ textContent: text }));
+  const editable = {
+    textContent: lines.join(''), // what plain .textContent would report, no separator
+    querySelectorAll: (sel: string) => (sel === 'p' ? paragraphs : []),
+    scrollIntoView: () => {},
+    getBoundingClientRect: () => ({ left: 100, top: 200, width: 50, height: 20 }),
+  };
+  return {
+    getAttribute: (name: string) => (name === 'data-row-id' ? rowId : null),
+    querySelector: (sel: string) => (sel === '.table-cell-content' ? editable : null),
+  };
+}
+
+describe('buildCellLocatorExpression with multi-line cells', () => {
+  it('joins sibling <p> lines with a newline instead of the .textContent run-on', () => {
+    const table = [
+      makeFakeTd('row_1', 'Michael'),
+      makeFakeMultiLineTd('row_1', ['fix: [F22-6659] one thing', 'fix: [F22-6531] another thing']),
+    ];
+    const result = locate('Michael', 1, table);
+    expect(result.found).toBe(true);
+    expect(result.currentText).toBe('fix: [F22-6659] one thing\nfix: [F22-6531] another thing');
+  });
+
+  it('matches a row-anchor against the newline-joined text, not the run-on .textContent', () => {
+    const table = [
+      makeFakeMultiLineTd('row_1', ['Last workday', 'Today\'s plan']),
+      makeFakeTd('row_1', 'Tue'),
+    ];
+    const result = locate("Last workday\nToday's plan", 1, table);
+    expect(result.found).toBe(true);
+    expect(result.currentText).toBe('Tue');
   });
 });
 
