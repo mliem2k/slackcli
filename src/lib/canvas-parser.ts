@@ -66,15 +66,18 @@ function processCodeBlocks(html: string): string {
 /** Remove editor noise: temp IDs, decorative classes, style attrs, spans, trailing br. */
 function stripNoise(html: string): string {
   let result = html;
+  // The (?<!\s) lookbehind starts each attribute match only at the first
+  // whitespace of a run, so a long run without the attribute is scanned once
+  // instead of once per position (quadratic backtracking, #213).
   // Remove id attributes
-  result = result.replace(/\s+id=(?:'[^']*'|"[^"]*")/gi, '');
+  result = result.replace(/(?<!\s)\s+id=(?:'[^']*'|"[^"]*")/gi, '');
   // Remove style attributes
-  result = result.replace(/\s+style=(?:'[^']*'|"[^"]*")/gi, '');
+  result = result.replace(/(?<!\s)\s+style=(?:'[^']*'|"[^"]*")/gi, '');
   // Remove value attributes on li
-  result = result.replace(/\s+value=(?:'[^']*'|"[^"]*")/gi, '');
+  result = result.replace(/(?<!\s)\s+value=(?:'[^']*'|"[^"]*")/gi, '');
   // Remove decorative classes (keep semantic ones: checked, embedded-file, embedded-link, prettyprint)
   result = result.replace(
-    /\s+class=(?:'([^']*)'|"([^"]*)")/gi,
+    /(?<!\s)\s+class=(?:'([^']*)'|"([^"]*)")/gi,
     (_match, single: string | undefined, double: string | undefined) => {
       const val = single ?? double ?? '';
       if (/^(checked|embedded-file|embedded-link|prettyprint)$/.test(val.trim())) {
@@ -121,10 +124,29 @@ function convertControlElements(html: string): string {
       if (linkMatch) return `[${linkMatch[2]}](${linkMatch[1]})`;
 
       // Plain text (dates, etc.)
-      const text = inner.replace(/<[^>]*>/g, '').trim();
+      const text = stripAngleSpans(inner).trim();
       return text;
     },
   );
+}
+
+/**
+ * Remove every `<...>` span, exactly like `s.replace(/<[^>]*>/g, '')`, in
+ * linear time. The regex retries from every `<` in a run with no `>` (#213),
+ * and `/<[^<>]*>/g` would change output and can reassemble a tag from pieces.
+ */
+function stripAngleSpans(s: string): string {
+  let out = '';
+  let i = 0;
+  for (;;) {
+    const lt = s.indexOf('<', i);
+    if (lt === -1) return out + s.slice(i);
+    const gt = s.indexOf('>', lt + 1);
+    // No closing '>' after this '<' means none after any later '<' either.
+    if (gt === -1) return out + s.slice(i);
+    out += s.slice(i, lt);
+    i = gt + 1;
+  }
 }
 
 /** Convert embedded files and links. */
