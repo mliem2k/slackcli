@@ -5,7 +5,7 @@ import { getWorkspace } from '../lib/workspaces.ts';
 import { editCanvasCellAuto } from '../lib/canvas-editor.ts';
 import { error, success, formatCanvasList, formatCanvasContent, warning, writeJson, writeText } from '../lib/formatter.ts';
 import { applyFields, fieldsOption, FIELDS_DESCRIPTION, FIELDS_FLAG } from '../lib/json-fields.ts';
-import { canvasHtmlToMarkdown } from '../lib/canvas-parser.ts';
+import { canvasHtmlToMarkdown, canvasEditPersisted } from '../lib/canvas-parser.ts';
 import { buildSectionCriteria, sectionsOf } from '../lib/canvas-sections.ts';
 import {
   buildCanvasChange,
@@ -31,6 +31,9 @@ import type { SlackCanvas } from '../types/index.ts';
 import { CHANNEL_NAME_NOTE, describeCommand, type CommandHelp } from '../lib/help.ts';
 import { failCommand } from '../lib/command-errors.ts';
 import { InvalidInputError } from '../lib/cli-errors.ts';
+
+const CANVAS_ID_PATTERN = /^F[A-Z0-9]+$/i;
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 // --help content, kept apart from the command chains below (#324).
 const HELP = {
@@ -599,11 +602,7 @@ export function createCanvasCommand(): Command {
             if (!downloadUrl) continue;
             const html = await client.downloadFile(downloadUrl, MAX_FILE_SIZE);
             const markdown = canvasHtmlToMarkdown(html);
-            // Clearing to empty has no positive text to search for; the closest verifiable
-            // signal is that the old content is actually gone (assumes `before` was specific
-            // enough not to appear elsewhere in the doc, true for every real use so far).
-            const matches =
-              options.text === '' ? result.before.length === 0 || !markdown.includes(result.before) : markdown.includes(options.text);
+            const matches = canvasEditPersisted(markdown, options.text, result.before);
             if (matches) {
               persisted = true;
               break;
