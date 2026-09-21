@@ -92,13 +92,22 @@ export function buildCellLocatorExpression(
   excludeRowIds: string[] = []
 ): string {
   return `(() => {
+    // Each rendered line in a cell is its own sibling <p class="line"> (confirmed live: a real
+    // multi-line cell is N separate <p> elements, not one <p> with embedded newlines), and plain
+    // .textContent concatenates sibling elements with no separator at all. So a cell genuinely
+    // holding two lines reads back as one run-on string without this join, which silently
+    // defeats any anchor or comparison expecting the newline back.
+    const cellText = (el) => {
+      const lines = Array.from(el.querySelectorAll('p'));
+      return (lines.length > 1 ? lines.map((p) => p.textContent).join('\\n') : el.textContent).trim();
+    };
     const rowAnchorText = ${JSON.stringify(rowAnchorText)};
     const columnOffset = ${JSON.stringify(columnOffset)};
     const excludeRowIds = new Set(${JSON.stringify(excludeRowIds)});
     const cells = Array.from(document.querySelectorAll('td.table-cell'));
     const anchorCell = cells.find((td) => {
       const content = td.querySelector('.table-cell-content');
-      if (!content || content.textContent.trim() !== rowAnchorText) return false;
+      if (!content || cellText(content) !== rowAnchorText) return false;
       return !excludeRowIds.has(td.getAttribute('data-row-id'));
     });
     if (!anchorCell) return { found: false, reason: 'row_not_found' };
@@ -116,7 +125,7 @@ export function buildCellLocatorExpression(
       found: true,
       x: rect.left + rect.width / 2,
       y: rect.top + rect.height / 2,
-      currentText: editable.textContent.trim(),
+      currentText: cellText(editable),
       rowId,
       targetIndex,
     };
@@ -130,6 +139,12 @@ export function buildCellLocatorExpression(
  */
 export function buildCellLocatorByIdExpression(rowId: string, targetIndex: number): string {
   return `(() => {
+    // See buildCellLocatorExpression's cellText: sibling <p class="line"> elements need an
+    // explicit join, plain .textContent silently drops the newline between them.
+    const cellText = (el) => {
+      const lines = Array.from(el.querySelectorAll('p'));
+      return (lines.length > 1 ? lines.map((p) => p.textContent).join('\\n') : el.textContent).trim();
+    };
     const rowId = ${JSON.stringify(rowId)};
     const targetIndex = ${JSON.stringify(targetIndex)};
     const rowCells = Array.from(document.querySelectorAll('td.table-cell[data-row-id="' + CSS.escape(rowId) + '"]'));
@@ -143,7 +158,7 @@ export function buildCellLocatorByIdExpression(rowId: string, targetIndex: numbe
       found: true,
       x: rect.left + rect.width / 2,
       y: rect.top + rect.height / 2,
-      currentText: editable.textContent.trim(),
+      currentText: cellText(editable),
       rowId,
       targetIndex,
     };
@@ -509,7 +524,32 @@ export async function editCanvasCell(
     await clearFocusedCell(session, cell.rowId, cell.targetIndex, before.length, sleep);
   }
   if (options.text.length > 0) {
-    await session.send('Input.insertText', { text: options.text });
+    // Input.insertText has no concept of a line break: an embedded "\n" is inserted as inert
+    // text (confirmed live), not a real paragraph split, so a multi-line --text collapses to one
+    // run-on <p> with the newline silently dropped. A genuine new <p class="line"> is only
+    // produced by whatever this editor's own paragraph-split handling actually listens for, and
+    // that has NOT been found: a CDP-simulated Enter keydown/keyup (both rawKeyDown, which fires
+    // the JS event without the browser's native default action, and keyDown, which allows it) and
+    // document.execCommand('insertParagraph') (the browser's own beforeinput/input insertParagraph
+    // sequence) were all tried live against a real cell and all three produced the identical
+    // result: every segment's text lands correctly, in order, but no split ever appears, so the
+    // cell readback comes back as one run-on <p> regardless. Insertion still proceeds
+    // segment-by-segment below so a caller gets a clean save_not_confirmed failure (the readback
+    // genuinely won't match a multi-line options.text) rather than a silent, wrongly-merged
+    // "success", but a --text containing \n cannot actually be written as separate lines yet.
+    // Whoever picks this up next needs live devtools/console access on the real canvas tab to see
+    // what event this editor's own paragraph-split logic is actually keying off, which none of
+    // rawKeyDown, keyDown, or execCommand's synthesized event apparently satisfies.
+    const lines = options.text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0) {
+        await session.send('Runtime.evaluate', { expression: `document.execCommand('insertParagraph')` });
+        await sleep(40);
+      }
+      if (lines[i].length > 0) {
+        await session.send('Input.insertText', { text: lines[i] });
+      }
+    }
   }
   // Any save request sent before this point may only reflect an intermediate state from clearing,
   // never the final text; only a request sent at or after this instant is evidence of anything.
