@@ -262,12 +262,18 @@ async function locateCellById(session: CdpSession, rowId: string, targetIndex: n
  * content overflows its own box) rather than hardcoding that class name, since it is an
  * implementation detail of Slack's own app, not a public contract.
  */
-const SCROLL_CONTAINER_STEP_EXPRESSION = `(() => {
+export const SCROLL_CONTAINER_STEP_EXPRESSION = `(() => {
   const candidates = Array.from(document.querySelectorAll('*')).filter(
     (el) => el.scrollHeight > el.clientHeight + 50 && el.clientHeight > 200
   );
   if (candidates.length === 0) return { scrolled: false, atBottom: true };
-  const container = candidates[0];
+  // Pick the candidate with the largest actual overflow, not just the first DOM match: the page
+  // carries several small scrollable widgets (a table-of-contents drawer, a scrollbar wrapper)
+  // that also pass the filter above but scroll almost nothing, confirmed live on the real canvas.
+  // The true virtualized content pane has by far the largest scrollHeight-minus-clientHeight gap.
+  const container = candidates.reduce((best, el) =>
+    (el.scrollHeight - el.clientHeight) > (best.scrollHeight - best.clientHeight) ? el : best
+  );
   const before = container.scrollTop;
   container.scrollBy(0, container.clientHeight * 0.9);
   const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 2;
