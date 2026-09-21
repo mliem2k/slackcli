@@ -121,56 +121,74 @@ describe('buildCellLocatorExpression with excludeRowIds', () => {
 // content pane.
 
 function makeFakeScrollable(scrollHeight: number, clientHeight: number, scrollTop = 0) {
-  const el = {
+  return {
     scrollHeight,
     clientHeight,
     scrollTop,
-    scrollBy(_x: number, y: number) {
-      const max = scrollHeight - clientHeight;
-      el.scrollTop = Math.max(0, Math.min(max, el.scrollTop + y));
+    dispatchedEvents: [] as string[],
+    dispatchEvent(event: { type: string }) {
+      this.dispatchedEvents.push(event.type);
     },
   };
-  return el;
 }
 
-function runScrollStep(candidates: unknown[]): any {
-  const fakeDocument = { querySelectorAll: (sel: string) => (sel === '*' ? candidates : []) };
+function runScrollStep(candidates: unknown[], tableCells: unknown[] = []): any {
+  const fakeDocument = {
+    querySelectorAll: (sel: string) => (sel === '*' ? candidates : sel === 'td.table-cell' ? tableCells : []),
+  };
   const fn = new Function('document', `return ${SCROLL_CONTAINER_STEP_EXPRESSION};`);
   return fn(fakeDocument);
 }
 
 describe('SCROLL_CONTAINER_STEP_EXPRESSION', () => {
-  it('scrolls the candidate with the largest overflow, not the first DOM match', () => {
+  it('jumps the candidate with the largest overflow straight to its own bottom', () => {
     // Real values captured from the live Sprint canvas: a small scrollbar wrapper happens to
     // appear first in document order, while the true content pane (by far the largest gap
-    // between scrollHeight and clientHeight) appears second.
+    // between scrollHeight and clientHeight) appears second. Nudging by a fraction of a viewport
+    // was confirmed live to mount nothing at all; only landing exactly on the scroll boundary
+    // triggers the reveal, so the assertion is the exact bottom, not merely "moved".
     const scrollbarWrapper = makeFakeScrollable(365, 307);
     const contentPane = makeFakeScrollable(32775, 310);
     const result = runScrollStep([scrollbarWrapper, contentPane]);
 
-    expect(result.scrolled).toBe(true);
-    expect(contentPane.scrollTop).toBeGreaterThan(0);
+    expect(result.found).toBe(true);
+    expect(contentPane.scrollTop).toBe(32775 - 310);
+    expect(contentPane.dispatchedEvents).toEqual(['scroll']);
     expect(scrollbarWrapper.scrollTop).toBe(0);
+    expect(scrollbarWrapper.dispatchedEvents).toEqual([]);
   });
 
-  it('does not report atBottom just because a small unrelated widget is already maxed out', () => {
-    const scrollbarWrapper = makeFakeScrollable(365, 307, 58); // already at its own bottom
-    const contentPane = makeFakeScrollable(32775, 310, 0); // real content, nowhere near the bottom
-    const result = runScrollStep([scrollbarWrapper, contentPane]);
-
-    expect(result.atBottom).toBe(false);
-  });
-
-  it('reports atBottom once the true content pane itself is exhausted', () => {
-    const contentPane = makeFakeScrollable(32775, 310, 32775 - 310 - 1); // one step from the end
+  it('reports the scrollHeight measured before the jump, not after', () => {
+    // The caller compares this across consecutive jumps to detect that nothing new mounted; a
+    // post-jump reading would compare against an already-grown value and never stabilize.
+    const contentPane = makeFakeScrollable(32775, 310);
     const result = runScrollStep([contentPane]);
 
-    expect(result.atBottom).toBe(true);
+    expect(result.scrollHeightBeforeJump).toBe(32775);
   });
 
-  it('returns scrolled false and atBottom true when nothing on the page is scrollable', () => {
-    const result = runScrollStep([]);
-    expect(result).toEqual({ scrolled: false, atBottom: true });
+  it('reports the current mounted cell count alongside scrollHeight', () => {
+    // A mount batch whose measured height happens to equal the placeholder it replaced would
+    // leave scrollHeight unchanged even though real content mounted; cellCount is the second,
+    // independent signal the caller uses so that case is not mistaken for having stabilized.
+    const contentPane = makeFakeScrollable(32775, 310);
+    const result = runScrollStep([contentPane], [{}, {}, {}]);
+
+    expect(result.cellCount).toBe(3);
+  });
+
+  it('ignores elements too small to be the virtualized content pane', () => {
+    const tinyOverflow = makeFakeScrollable(400, 380); // 20px gap, under the 50px floor
+    const shortViewport = makeFakeScrollable(5000, 150); // viewport under the 200px floor
+    const result = runScrollStep([tinyOverflow, shortViewport]);
+
+    expect(result).toEqual({ found: false });
+    expect(tinyOverflow.scrollTop).toBe(0);
+    expect(shortViewport.scrollTop).toBe(0);
+  });
+
+  it('returns found false when nothing on the page is scrollable', () => {
+    expect(runScrollStep([])).toEqual({ found: false });
   });
 });
 
@@ -181,12 +199,27 @@ interface FakeOptions {
   /** Load check reports ready only once at least this many Page.navigate calls have fired. */
   loadReadyAfterNavigateCount?: number;
   locatorResults: Array<{ found: true; x: number; y: number; currentText: string } | { found: false; reason: string }>;
-  /** Fire a matching request + response pair for the edit-document save on the click. */
-  fireSaveRequestOnClick?: boolean;
+  /** Fire a matching request + response pair for the edit-document save right after the
+   *  replacement text is typed, mirroring the real save-race fix: a save fired any earlier (on
+   *  the click, mid-clear) is stale and must not satisfy the wait. */
+  fireSaveRequestOnInsertText?: boolean;
+  /** Fires a save request + response pair on the click, before any clearing or typing happens:
+   *  reproduces the real live bug where a debounced autosave triggered mid-Backspace captures a
+   *  stale, partially-cleared snapshot and its response lands well before the final text exists. */
+  fireStaleSaveRequestOnClick?: boolean;
   /** HTTP status of the simulated save response. Defaults to 200 (success) when firing. */
   saveResponseStatus?: number;
-  /** Scroll-step probes report "moved, not at bottom" until this many scroll calls have fired. */
+  /** How many scroll jumps fire before the caller recognizes the bottom. Each jump reports a
+   *  larger scrollHeight AND cellCount than the last (more content mounted) until the Nth, which
+   *  repeats the previous reading on both: two consecutive identical readings on BOTH signals are
+   *  the stabilization signal locateCellByScrolling actually stops on, so the smallest meaningful
+   *  value is 2 (one jump alone can never establish that nothing changed). Defaults to 2. */
   scrollStepsBeforeBottom?: number;
+  /** Overrides cellCount independently of scrollHeightBeforeJump, to simulate a mount whose
+   *  measured height happens to equal the placeholder it replaced (scrollHeight stays put while
+   *  content still mounts). Called with the 1-indexed jump number; return the cellCount for that
+   *  jump. When unset, cellCount tracks scrollHeightBeforeJump's own growth pattern exactly. */
+  cellCountForStep?: (stepNumber: number) => number;
   /** Simulates a click that landed mid-content: Backspace batches alone never report empty, only Delete does. */
   requireDeleteToEmpty?: boolean;
 }
@@ -228,10 +261,17 @@ function makeFakeSession(opts: FakeOptions): { session: CdpSession; calls: Array
 
       if (method === 'Runtime.evaluate') {
         const expression = String(params?.expression ?? '');
-        if (expression.includes('scrollBy')) {
+        if (expression.includes('scrollHeightBeforeJump')) {
           scrollStepCount += 1;
-          const atBottom = scrollStepCount >= (opts.scrollStepsBeforeBottom ?? 0);
-          return { result: { value: { scrolled: !atBottom, atBottom } } } as T;
+          // Growing reading per jump until the Nth, which repeats the (N-1)th: the caller sees a
+          // changing scrollHeight (more content revealed) and keeps going, then two identical
+          // readings in a row and stops. Clamping is what produces that repeat.
+          const lastFreshStep = (opts.scrollStepsBeforeBottom ?? 2) - 1;
+          const scrollHeightBeforeJump = 30_000 + Math.min(scrollStepCount, lastFreshStep) * 500;
+          const cellCount = opts.cellCountForStep
+            ? opts.cellCountForStep(scrollStepCount)
+            : 30 + Math.min(scrollStepCount, lastFreshStep) * 20;
+          return { result: { value: { found: true, scrollHeightBeforeJump, cellCount } } } as T;
         }
         if (!expression.startsWith('(() => {')) {
           const ready =
@@ -248,13 +288,28 @@ function makeFakeSession(opts: FakeOptions): { session: CdpSession; calls: Array
         return { result: { value } } as T;
       }
 
-      if (method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed' && opts.fireSaveRequestOnClick) {
-        const requestId = 'save-request-1';
+      if (method === 'Input.insertText' && opts.fireSaveRequestOnInsertText) {
+        // A real macrotask delay, not a microtask: editCanvasCell reads finalInputAt = Date.now()
+        // synchronously right after this call returns, so the fake save's own timestamp must land
+        // on a genuinely later tick to be distinguishable, exactly the property the fix checks for.
+        setTimeout(() => {
+          const requestId = 'save-request-1';
+          for (const handler of handlers.get('Network.requestWillBeSent') ?? []) {
+            handler({ requestId, request: { url: 'https://team.slack.com/canvas/-/edit-document?_x_version_ts=1' } });
+          }
+          for (const handler of handlers.get('Network.responseReceived') ?? []) {
+            handler({ requestId, response: { status: opts.saveResponseStatus ?? 200 } });
+          }
+        }, 1);
+      }
+
+      if (method === 'Input.dispatchMouseEvent' && params?.type === 'mousePressed' && opts.fireStaleSaveRequestOnClick) {
+        const requestId = 'stale-save-request';
         for (const handler of handlers.get('Network.requestWillBeSent') ?? []) {
           handler({ requestId, request: { url: 'https://team.slack.com/canvas/-/edit-document?_x_version_ts=1' } });
         }
         for (const handler of handlers.get('Network.responseReceived') ?? []) {
-          handler({ requestId, response: { status: opts.saveResponseStatus ?? 200 } });
+          handler({ requestId, response: { status: 200 } });
         }
       }
 
@@ -266,7 +321,12 @@ function makeFakeSession(opts: FakeOptions): { session: CdpSession; calls: Array
   return { session, calls };
 }
 
-const instantSleep = () => Promise.resolve();
+// A macrotask tick, not a bare microtask: waitFor's poll loop calls this between checks, and a
+// pure Promise.resolve() never yields to a pending setTimeout-based fake (the save-request timing
+// fakes below need one), so a tight poll loop can spin through its whole real-clock deadline
+// without that timer ever getting a turn. setTimeout(0) is still effectively instant for test
+// purposes, it just actually reaches the macrotask queue instead of starving it.
+const instantSleep = () => new Promise<void>((r) => setTimeout(r, 0));
 
 describe('editCanvasCell', () => {
   it('re-locates by row id after the initial find, not by re-matching the anchor text', async () => {
@@ -278,7 +338,7 @@ describe('editCanvasCell', () => {
         { found: true, x: 10, y: 20, currentText: 'Working', rowId: 'row_abc123', targetIndex: 2 } as any,
         { found: true, x: 10, y: 20, currentText: 'Done', rowId: 'row_abc123', targetIndex: 2 } as any,
       ],
-      fireSaveRequestOnClick: true,
+      fireSaveRequestOnInsertText: true,
     });
 
     const result = await editCanvasCell(session, {
@@ -307,7 +367,7 @@ describe('editCanvasCell', () => {
         { found: true, x: 10, y: 20, currentText: 'Working' },
         { found: true, x: 10, y: 20, currentText: 'Done' },
       ],
-      fireSaveRequestOnClick: true,
+      fireSaveRequestOnInsertText: true,
     });
 
     const result = await editCanvasCell(session, {
@@ -343,7 +403,7 @@ describe('editCanvasCell', () => {
         { found: true, x: 10, y: 20, currentText: 'Working' },
         { found: true, x: 10, y: 20, currentText: 'Done' },
       ],
-      fireSaveRequestOnClick: true,
+      fireSaveRequestOnInsertText: true,
       requireDeleteToEmpty: true, // the click landed before some content; only Delete clears it
     });
 
@@ -367,7 +427,7 @@ describe('editCanvasCell', () => {
         { found: true, x: 10, y: 20, currentText: '' },
         { found: true, x: 10, y: 20, currentText: 'Working' },
       ],
-      fireSaveRequestOnClick: true,
+      fireSaveRequestOnInsertText: true,
     });
 
     const result = await editCanvasCell(session, {
@@ -438,7 +498,7 @@ describe('editCanvasCell', () => {
         { found: true, x: 10, y: 20, currentText: 'Working' },
         { found: true, x: 10, y: 20, currentText: 'Done' },
       ],
-      fireSaveRequestOnClick: true,
+      fireSaveRequestOnInsertText: true,
     });
 
     const result = await editCanvasCell(session, {
@@ -464,8 +524,8 @@ describe('editCanvasCell', () => {
         { found: true, x: 10, y: 20, currentText: 'Working' },
         { found: true, x: 10, y: 20, currentText: 'Done' },
       ],
-      scrollStepsBeforeBottom: 5, // plenty of room; the row is found before the container bottoms out
-      fireSaveRequestOnClick: true,
+      scrollStepsBeforeBottom: 5, // plenty of room; the row is found before the container stabilizes
+      fireSaveRequestOnInsertText: true,
     });
 
     const result = await editCanvasCell(session, {
@@ -477,14 +537,16 @@ describe('editCanvasCell', () => {
     });
 
     expect(result).toEqual({ ok: true, before: 'Working', after: 'Done' });
-    // Two scroll steps before the third locate call finds it.
-    expect(calls.filter((c) => c.method === 'Runtime.evaluate' && String(c.params?.expression).includes('scrollBy'))).toHaveLength(2);
+    // Two scroll jumps before the third locate call finds it.
+    expect(
+      calls.filter((c) => c.method === 'Runtime.evaluate' && String(c.params?.expression).includes('scrollHeightBeforeJump'))
+    ).toHaveLength(2);
   });
 
-  it('gives up with row_not_found once the scroll container bottoms out', async () => {
-    const { session } = makeFakeSession({
+  it('gives up with row_not_found once two consecutive jumps reveal nothing new', async () => {
+    const { session, calls } = makeFakeSession({
       locatorResults: [{ found: false, reason: 'row_not_found' }],
-      scrollStepsBeforeBottom: 1, // already at the bottom on the first scroll step
+      scrollStepsBeforeBottom: 2, // second jump repeats the first jump's scrollHeight: stabilized
     });
 
     const result = await editCanvasCell(session, {
@@ -497,6 +559,64 @@ describe('editCanvasCell', () => {
 
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe('row_not_found');
+    // Exactly two: the reason for stopping must be the repeated scrollHeight, not the deadline.
+    // Without the stabilization check this keeps jumping until loadTimeoutMs expires and still
+    // reports row_not_found, so the reason assertion alone cannot tell the two apart.
+    expect(
+      calls.filter((c) => c.method === 'Runtime.evaluate' && String(c.params?.expression).includes('scrollHeightBeforeJump'))
+    ).toHaveLength(2);
+  });
+
+  it('does not stabilize on a repeated scrollHeight alone while cellCount keeps changing', async () => {
+    // Reproduces a real hazard: a mount batch whose measured height happens to equal the
+    // placeholder it replaced leaves scrollHeight unchanged even though content genuinely mounted.
+    // scrollHeight repeats from the very first jump here; cellCount is what actually keeps moving
+    // and is what the loop must wait on before giving up.
+    const { session, calls } = makeFakeSession({
+      locatorResults: [{ found: false, reason: 'row_not_found' }],
+      cellCountForStep: (step) => (step >= 4 ? 90 : 30 + step * 20), // stabilizes on cellCount at jump 4
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Nobody',
+      columnOffset: 0,
+      text: 'x',
+      sleep: instantSleep,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('row_not_found');
+    // Four jumps, not the two a scrollHeight-only check would have stopped at: scrollHeight alone
+    // repeats from jump 1 onward here, so a check ignoring cellCount would give up after jump 2.
+    expect(
+      calls.filter((c) => c.method === 'Runtime.evaluate' && String(c.params?.expression).includes('scrollHeightBeforeJump'))
+    ).toHaveLength(4);
+  });
+
+  it('labels a search that ran out of time as such, not as a completed scroll to the bottom', async () => {
+    // A deadline cutoff and a genuinely confirmed absence must not read the same to the caller:
+    // the row may still exist further down when the search simply ran out of time.
+    const { session } = makeFakeSession({
+      locatorResults: [{ found: false, reason: 'row_not_found' }],
+      scrollStepsBeforeBottom: 1000, // never stabilizes within the microscopic deadline below
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Nobody',
+      columnOffset: 0,
+      text: 'x',
+      loadTimeoutMs: 1,
+      sleep: instantSleep,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('row_not_found');
+      expect(result.message).toContain('ran out of time');
+      expect(result.message).not.toContain('scrolled to the bottom');
+    }
   });
 
   it('fails with save_not_confirmed when the cell reads back unchanged', async () => {
@@ -505,7 +625,7 @@ describe('editCanvasCell', () => {
         { found: true, x: 10, y: 20, currentText: 'Working' },
         { found: true, x: 10, y: 20, currentText: 'Working' }, // readback: edit never applied
       ],
-      fireSaveRequestOnClick: true,
+      fireSaveRequestOnInsertText: true,
     });
 
     const result = await editCanvasCell(session, {
@@ -529,7 +649,7 @@ describe('editCanvasCell', () => {
         { found: true, x: 10, y: 20, currentText: 'Working' },
         { found: true, x: 10, y: 20, currentText: 'Done' }, // DOM shows the edit applied locally...
       ],
-      fireSaveRequestOnClick: true,
+      fireSaveRequestOnInsertText: true,
       saveResponseStatus: 409, // ...but the server rejected the save (e.g. a version conflict)
     });
 
@@ -548,6 +668,39 @@ describe('editCanvasCell', () => {
     }
   });
 
+  it('rejects a save response that arrived before the final text existed, even a 2xx one', async () => {
+    // Reproduces a real live bug: Slack's autosave is debounced and fires WHILE clearing, not
+    // only once the final text lands, so a long clear+replace reliably produces an early save
+    // request mid-Backspace that captures a partially-cleared, stale snapshot with a perfectly
+    // successful 2xx response, well before the real edit finishes. A check that accepts the first
+    // save response it ever sees is satisfied by that stale one; the DOM readback below is
+    // genuinely correct at that moment, so a naive check reports ok:true while what actually
+    // persists server-side is the intermediate text. No second save is fired here at all, so a
+    // correct fix must time out waiting for one, not succeed on the stale one.
+    const { session } = makeFakeSession({
+      locatorResults: [
+        { found: true, x: 10, y: 20, currentText: 'Working' },
+        { found: true, x: 10, y: 20, currentText: 'Done' },
+      ],
+      fireStaleSaveRequestOnClick: true,
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Michael',
+      columnOffset: 1,
+      text: 'Done',
+      saveTimeoutMs: 5,
+      sleep: instantSleep,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('save_not_confirmed');
+      expect(result.message).toContain('no save response');
+    }
+  });
+
   it('edits the second occurrence of a repeated anchor, not the first', async () => {
     // Reproduces the real hazard this option exists for: "Michael" matching an already-filled
     // historical row before the intended blank one further down the same canvas. Without
@@ -558,7 +711,7 @@ describe('editCanvasCell', () => {
         { found: true, x: 10, y: 20, currentText: 'New work', rowId: 'row_2', targetIndex: 1 } as any,
         { found: true, x: 10, y: 20, currentText: 'Done', rowId: 'row_2', targetIndex: 1 } as any,
       ],
-      fireSaveRequestOnClick: true,
+      fireSaveRequestOnInsertText: true,
     });
 
     const result = await editCanvasCell(session, {
@@ -583,7 +736,7 @@ describe('editCanvasCell', () => {
         { found: true, x: 5, y: 5, currentText: 'Old work' },
         { found: true, x: 5, y: 5, currentText: 'Done' },
       ],
-      fireSaveRequestOnClick: true,
+      fireSaveRequestOnInsertText: true,
     });
 
     const result = await editCanvasCell(session, {
@@ -600,13 +753,13 @@ describe('editCanvasCell', () => {
   });
 
   it('fails with row_not_found, and names the occurrence, when fewer matches exist than requested', async () => {
-    const { session } = makeFakeSession({
+    const { session, calls } = makeFakeSession({
       locatorResults: [
         { found: true, x: 5, y: 5, currentText: 'Old work', rowId: 'row_1', targetIndex: 1 } as any,
         { found: true, x: 10, y: 20, currentText: 'New work', rowId: 'row_2', targetIndex: 1 } as any,
         { found: false, reason: 'row_not_found' },
       ],
-      scrollStepsBeforeBottom: 1, // already at the bottom by the time the third locate comes up empty
+      scrollStepsBeforeBottom: 2, // stabilizes on the second jump, with only two matches ever found
     });
 
     const result = await editCanvasCell(session, {
@@ -623,6 +776,9 @@ describe('editCanvasCell', () => {
       expect(result.reason).toBe('row_not_found');
       expect(result.message).toContain('occurrence 3');
     }
+    expect(
+      calls.filter((c) => c.method === 'Runtime.evaluate' && String(c.params?.expression).includes('scrollHeightBeforeJump'))
+    ).toHaveLength(2);
   });
 
   it('fails with save_not_confirmed when no autosave request is observed', async () => {
@@ -631,7 +787,7 @@ describe('editCanvasCell', () => {
         { found: true, x: 10, y: 20, currentText: 'Working' },
         { found: true, x: 10, y: 20, currentText: 'Done' },
       ],
-      fireSaveRequestOnClick: false,
+      fireSaveRequestOnInsertText: false,
     });
 
     const result = await editCanvasCell(session, {
