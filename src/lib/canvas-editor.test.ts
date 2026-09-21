@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { buildCellLocatorExpression, editCanvasCell } from './canvas-editor';
+import { SCROLL_CONTAINER_STEP_EXPRESSION, buildCellLocatorExpression, editCanvasCell } from './canvas-editor';
 import type { CdpSession } from './cdp-client';
 
 // --- buildCellLocatorExpression, evaluated against a hand-built fake DOM ---
@@ -112,6 +112,65 @@ describe('buildCellLocatorExpression with excludeRowIds', () => {
     const result = locateExcluding('Michael', 1, table, ['row_does_not_exist']);
     expect(result.found).toBe(true);
     expect(result.rowId).toBe('row_1');
+  });
+});
+
+// --- SCROLL_CONTAINER_STEP_EXPRESSION, evaluated against a hand-built fake DOM ---
+// with multiple candidate scrollable elements, mirroring what the real Sprint canvas page
+// actually contains: several small unrelated scrollable widgets alongside the true virtualized
+// content pane.
+
+function makeFakeScrollable(scrollHeight: number, clientHeight: number, scrollTop = 0) {
+  const el = {
+    scrollHeight,
+    clientHeight,
+    scrollTop,
+    scrollBy(_x: number, y: number) {
+      const max = scrollHeight - clientHeight;
+      el.scrollTop = Math.max(0, Math.min(max, el.scrollTop + y));
+    },
+  };
+  return el;
+}
+
+function runScrollStep(candidates: unknown[]): any {
+  const fakeDocument = { querySelectorAll: (sel: string) => (sel === '*' ? candidates : []) };
+  const fn = new Function('document', `return ${SCROLL_CONTAINER_STEP_EXPRESSION};`);
+  return fn(fakeDocument);
+}
+
+describe('SCROLL_CONTAINER_STEP_EXPRESSION', () => {
+  it('scrolls the candidate with the largest overflow, not the first DOM match', () => {
+    // Real values captured from the live Sprint canvas: a small scrollbar wrapper happens to
+    // appear first in document order, while the true content pane (by far the largest gap
+    // between scrollHeight and clientHeight) appears second.
+    const scrollbarWrapper = makeFakeScrollable(365, 307);
+    const contentPane = makeFakeScrollable(32775, 310);
+    const result = runScrollStep([scrollbarWrapper, contentPane]);
+
+    expect(result.scrolled).toBe(true);
+    expect(contentPane.scrollTop).toBeGreaterThan(0);
+    expect(scrollbarWrapper.scrollTop).toBe(0);
+  });
+
+  it('does not report atBottom just because a small unrelated widget is already maxed out', () => {
+    const scrollbarWrapper = makeFakeScrollable(365, 307, 58); // already at its own bottom
+    const contentPane = makeFakeScrollable(32775, 310, 0); // real content, nowhere near the bottom
+    const result = runScrollStep([scrollbarWrapper, contentPane]);
+
+    expect(result.atBottom).toBe(false);
+  });
+
+  it('reports atBottom once the true content pane itself is exhausted', () => {
+    const contentPane = makeFakeScrollable(32775, 310, 32775 - 310 - 1); // one step from the end
+    const result = runScrollStep([contentPane]);
+
+    expect(result.atBottom).toBe(true);
+  });
+
+  it('returns scrolled false and atBottom true when nothing on the page is scrollable', () => {
+    const result = runScrollStep([]);
+    expect(result).toEqual({ scrolled: false, atBottom: true });
   });
 });
 
