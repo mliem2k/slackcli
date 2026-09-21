@@ -34,10 +34,19 @@ export function isAuthPage(html: string): boolean {
  * the confirmation check `canvas edit-cell` uses to verify a save actually persisted rather than
  * only appearing to in the browser. A table cell is one GFM line by construction
  * (`convertCellContent` below), so a multi-line replacement's embedded newlines never survive the
- * round trip verbatim, confirmed live: they come back collapsed to roughly a single space. A raw
- * substring check on such a value then reports "not persisted" forever, even for a fully
- * successful save. Whitespace runs are collapsed to a single space on both sides before comparing
- * so the check reflects content, not incidental spacing.
+ * round trip verbatim; a genuinely persisted multi-line cell's lines come back joined by a single
+ * space instead. Whitespace runs are collapsed to a single space on both sides before comparing so
+ * the check reflects content, not incidental spacing.
+ *
+ * This depends on `convertCellContent` actually joining lines with a space, which it did not
+ * always do: an earlier version unwrapped each line's <p>/<div> wrapper by replacing it with
+ * nothing at all, so two real, successfully persisted lines came back mashed together with
+ * literally nothing between them ("one thingfix: [F22-6531]...", confirmed live), which this
+ * space-joined comparison could never match. That reported a perfectly successful save as "did
+ * not persist" on every multi-line edit. See the end-to-end test below that runs real multi-<p>
+ * table HTML through canvasHtmlToMarkdown itself rather than a pre-joined markdown fixture, which
+ * is what actually catches a regression here; a hand-written markdown string only tests this
+ * function's own string matching, never the pipeline that is supposed to produce that string.
  *
  * Clearing a cell to empty text has no positive value to search for, so the signal there is the
  * opposite: the cell's own prior content, `before`, must no longer appear anywhere in the doc
@@ -396,12 +405,22 @@ function cleanup(md: string): string {
 
 /** Convert table cell content: preserve inline formatting, strip block wrappers. */
 function convertCellContent(html: string): string {
-  // Unwrap block-level elements (keep children)
-  let result = html.replace(/<\/?(?:h[1-6]|p|div)\b[^>]*>/gi, '');
+  // Unwrap block-level elements (keep children). A GFM table cell has to stay one line, so a
+  // genuinely multi-line cell (each line its own sibling <p>/<div> in the real markup) can't keep
+  // its line breaks; the closest a cell can represent that is joining them with a space instead.
+  // Replacing with '' instead of a space, as an earlier version of this did, silently mashes
+  // adjacent lines into one word with nothing between them (confirmed live against a real
+  // multi-line cell: "one thing" next to "another thing" read back as "one thingfix:..."), not
+  // the "collapses to roughly a single space" this function's own caller, canvasEditPersisted,
+  // already assumed and built its whitespace normalization around.
+  let result = html.replace(/<\/?(?:h[1-6]|p|div)\b[^>]*>/gi, ' ');
   // Reuse the shared inline conversion
   result = convertInline(result);
   // Strip remaining HTML tags but preserve Slack mentions (<@U...>, <#C...>)
-  result = result.replace(/<\/?[a-zA-Z][^>]*>/g, '').replace(/\u200B/g, '').trim();
+  result = result.replace(/<\/?[a-zA-Z][^>]*>/g, '').replace(/\u200B/g, '');
+  // Collapse the whitespace runs the block-tag substitution above can produce (adjacent open/close
+  // tags each contribute their own space) down to single spaces, then trim the ends.
+  result = result.replace(/[ \t]+/g, ' ').trim();
   return result;
 }
 

@@ -442,12 +442,33 @@ describe('canvasEditPersisted', () => {
 
   it('matches a multi-line --text value whose embedded newlines are collapsed by convertCellContent', () => {
     // Reproduces a real live bug: a table cell is one GFM line by construction, so
-    // canvasHtmlToMarkdown's convertCellContent unwraps a multi-line cell's paragraph boundaries
-    // without reinserting a newline. A save that genuinely persisted therefore comes back with
-    // each "\n" in the original --text collapsed to roughly a single space, confirmed live.
+    // canvasHtmlToMarkdown's convertCellContent unwraps a multi-line cell's paragraph boundaries.
+    // A save that genuinely persisted therefore comes back with each "\n" in the original --text
+    // collapsed to a single space, confirmed live.
     const text = "Today's Plan\n- fix: [F22-6659] resolve the duplication\n- Send the review request";
     const markdown =
       "| FS (PT) | Michael | Today's Plan - fix: [F22-6659] resolve the duplication - Send the review request |  |\n";
+    expect(canvasEditPersisted(markdown, text, '')).toBe(true);
+  });
+
+  it('matches a real multi-<p> table cell run through the actual canvasHtmlToMarkdown pipeline, not a hand-built markdown string', () => {
+    // The test above hand-writes its `markdown` fixture already in the correctly space-joined
+    // shape, so it only ever proves canvasEditPersisted's own string matching is correct; it says
+    // nothing about whether canvasHtmlToMarkdown actually PRODUCES that shape. It didn't: an
+    // earlier version of convertCellContent unwrapped <p>/<div> by replacing with '', not a
+    // space, so two real sibling <p> lines (the genuine shape a persisted multi-line cell saves
+    // as, confirmed live) came back mashed together with nothing between them at all
+    // ("here-stringfix: [F22-6531]..."), which canvasEditPersisted's space-joined comparison could
+    // never match, reporting a perfectly successful save as "did not persist". This test starts
+    // from real table HTML, not a pre-normalized fixture, so it actually exercises that pipeline.
+    const html =
+      '<table><tr><td><p class="line">Role</p></td><td><p class="line">Name</p></td>' +
+      '<td><p class="line">Tue</p></td></tr>' +
+      '<tr><td><p class="line">FS (PT)</p></td><td><p class="line">Michael</p></td>' +
+      '<td><p class="line">fix: [F22-6659] one thing</p><p class="line">fix: [F22-6531] another thing</p></td></tr>' +
+      '</table>';
+    const markdown = canvasHtmlToMarkdown(`<body>${html}</body>`);
+    const text = 'fix: [F22-6659] one thing\nfix: [F22-6531] another thing';
     expect(canvasEditPersisted(markdown, text, '')).toBe(true);
   });
 

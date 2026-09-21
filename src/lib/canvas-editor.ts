@@ -92,14 +92,24 @@ export function buildCellLocatorExpression(
   excludeRowIds: string[] = []
 ): string {
   return `(() => {
-    // Each rendered line in a cell is its own sibling <p class="line"> (confirmed live: a real
-    // multi-line cell is N separate <p> elements, not one <p> with embedded newlines), and plain
-    // .textContent concatenates sibling elements with no separator at all. So a cell genuinely
-    // holding two lines reads back as one run-on string without this join, which silently
-    // defeats any anchor or comparison expecting the newline back.
+    // Two different DOM shapes hold one cell's lines depending on whether it is being actively
+    // edited right now. At rest (the shape a locate call sees before ever clicking into a cell),
+    // Slack's document model renders each line as a sibling <p class="line">. The moment a cell is
+    // focused for editing, it re-renders into its own live-editing shape instead: each line
+    // becomes a sibling .section, and each .section wraps exactly one .content div holding that
+    // line's actual text (confirmed live, including for a cell with only one line: it still gets
+    // wrapped in a single .section > .content). A readback taken right after an edit (this
+    // function is also used for the post-edit re-locate) is checking THAT shape, not <p>, so an
+    // earlier version of this checked only 'p' and always found zero elements while editing,
+    // silently falling back to element.textContent, which concatenates every line with no
+    // separator at all and defeats any comparison expecting the newline back. Check the
+    // editing shape first since a just-edited cell is the readback's whole point.
     const cellText = (el) => {
+      const sections = Array.from(el.querySelectorAll(':scope > .section > .content'));
+      if (sections.length > 0) return sections.map((c) => c.textContent).join('\\n').trim();
       const lines = Array.from(el.querySelectorAll('p'));
-      return (lines.length > 1 ? lines.map((p) => p.textContent).join('\\n') : el.textContent).trim();
+      if (lines.length > 0) return lines.map((p) => p.textContent).join('\\n').trim();
+      return el.textContent.trim();
     };
     const rowAnchorText = ${JSON.stringify(rowAnchorText)};
     const columnOffset = ${JSON.stringify(columnOffset)};
@@ -139,11 +149,15 @@ export function buildCellLocatorExpression(
  */
 export function buildCellLocatorByIdExpression(rowId: string, targetIndex: number): string {
   return `(() => {
-    // See buildCellLocatorExpression's cellText: sibling <p class="line"> elements need an
-    // explicit join, plain .textContent silently drops the newline between them.
+    // See buildCellLocatorExpression's cellText: a cell being actively edited (this function's
+    // whole purpose is re-locating one right after an edit) renders each line as a sibling
+    // .section > .content, not <p>; check that shape first, <p> second, plain .textContent last.
     const cellText = (el) => {
+      const sections = Array.from(el.querySelectorAll(':scope > .section > .content'));
+      if (sections.length > 0) return sections.map((c) => c.textContent).join('\\n').trim();
       const lines = Array.from(el.querySelectorAll('p'));
-      return (lines.length > 1 ? lines.map((p) => p.textContent).join('\\n') : el.textContent).trim();
+      if (lines.length > 0) return lines.map((p) => p.textContent).join('\\n').trim();
+      return el.textContent.trim();
     };
     const rowId = ${JSON.stringify(rowId)};
     const targetIndex = ${JSON.stringify(targetIndex)};
@@ -525,26 +539,20 @@ export async function editCanvasCell(
   }
   if (options.text.length > 0) {
     // Input.insertText has no concept of a line break: an embedded "\n" is inserted as inert
-    // text (confirmed live), not a real paragraph split, so a multi-line --text collapses to one
-    // run-on <p> with the newline silently dropped. A genuine new <p class="line"> is only
-    // produced by whatever this editor's own paragraph-split handling actually listens for, and
-    // that has NOT been found: a CDP-simulated Enter keydown/keyup (both rawKeyDown, which fires
-    // the JS event without the browser's native default action, and keyDown, which allows it) and
-    // document.execCommand('insertParagraph') (the browser's own beforeinput/input insertParagraph
-    // sequence) were all tried live against a real cell and all three produced the identical
-    // result: every segment's text lands correctly, in order, but no split ever appears, so the
-    // cell readback comes back as one run-on <p> regardless. Insertion still proceeds
-    // segment-by-segment below so a caller gets a clean save_not_confirmed failure (the readback
-    // genuinely won't match a multi-line options.text) rather than a silent, wrongly-merged
-    // "success", but a --text containing \n cannot actually be written as separate lines yet.
-    // Whoever picks this up next needs live devtools/console access on the real canvas tab to see
-    // what event this editor's own paragraph-split logic is actually keying off, which none of
-    // rawKeyDown, keyDown, or execCommand's synthesized event apparently satisfies.
+    // text, not a real paragraph split, so a multi-line --text collapses into one line with the
+    // newline silently dropped. A genuine new line needs an actual Enter keypress between
+    // segments (confirmed live via a diagnostic script instrumenting the real DOM after each
+    // step: dispatching Enter as rawKeyDown+keyUp does create a new sibling .section, immediately,
+    // exactly like clearFocusedCell's Backspace/Delete already rely on the same route for). What
+    // looked like this not working in an earlier version of this file was a bug in the READBACK
+    // (cellText was checking for <p> children, which is the shape a cell renders in at rest, not
+    // the .section > .content shape it actually re-renders into the moment it is focused for
+    // editing), not a write-side problem; see cellText in buildCellLocatorExpression.
     const lines = options.text.split('\n');
     for (let i = 0; i < lines.length; i++) {
       if (i > 0) {
-        await session.send('Runtime.evaluate', { expression: `document.execCommand('insertParagraph')` });
-        await sleep(40);
+        await dispatchKey(session, { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        await sleep(150);
       }
       if (lines[i].length > 0) {
         await session.send('Input.insertText', { text: lines[i] });
