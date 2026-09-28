@@ -772,6 +772,38 @@ describe('editCanvasCell', () => {
     expect(result).toEqual({ ok: true, before: 'second-valid-row', after: 'Done' });
   });
 
+  it('reports the excluded row as too narrow instead of row_not_found when it was the only match', async () => {
+    // Reproduces a second real live bug, found right after the occurrence-shifting fix above: once
+    // the sole anchor-text match is confirmed too narrow and excluded (two identical
+    // column_out_of_range readings for the same rowId), the next locate call has nothing left to
+    // find and reports a bare row_not_found. Without the lastExcludedNarrowRowDiagnosis fallback,
+    // that row_not_found becomes the caller-facing answer verbatim: "No cell in the canvas contains
+    // the exact text ...", even though the row was just found and specifically confirmed to exist,
+    // one column too narrow for the request. The honest answer is the column_out_of_range message.
+    const { session } = makeFakeSession({
+      locatorResults: [
+        { found: false, reason: 'column_out_of_range', rowId: 'only-row', rowCellCount: 2 },
+        { found: false, reason: 'column_out_of_range', rowId: 'only-row', rowCellCount: 2 },
+        { found: false, reason: 'row_not_found' },
+      ],
+      scrollStepsBeforeBottom: 2,
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'OnlyRow',
+      columnOffset: 10,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'column_out_of_range',
+      message: 'Found the row for "OnlyRow", but column offset 10 is out of range for it.',
+    });
+  });
+
   it('gives up with row_not_found once two consecutive jumps reveal nothing new', async () => {
     const { session, calls } = makeFakeSession({
       locatorResults: [{ found: false, reason: 'row_not_found' }],

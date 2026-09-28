@@ -399,6 +399,16 @@ type ScrollStep =
  * last jump's settle window already paid for) before concluding the row genuinely is not there,
  * distinct from a deadline cutoff, which the caller must not describe as a completed search.
  *
+ * A terminal `row_not_found` is not always the honest final answer: if a row was found earlier in
+ * this same search and specifically confirmed too narrow for `columnOffset` (excluded per the
+ * paragraph above), and it turns out to have been the sole or last remaining anchor-text match,
+ * the very next locate call reports `row_not_found` purely because the only candidate is now
+ * excluded, discarding the more specific, already-confirmed `column_out_of_range` diagnosis.
+ * Confirmed live: this produced the message "No cell in the canvas contains the exact text ..."
+ * for a row that genuinely exists, sending the user chasing a nonexistent row instead of the real
+ * problem, a `columnOffset` too large for that row. `lastExcludedNarrowRowDiagnosis` remembers the
+ * most recent such confirmation so a terminal `row_not_found` can fall back to it.
+ *
  * `occurrence` (1-indexed, default 1) picks the Nth cell matching `rowAnchorText` in top-to-
  * bottom document order, not just the first. A short cell value (a name, a role, a status word)
  * commonly repeats across unrelated tables in one long canvas (multiple weeks of the same
@@ -440,10 +450,19 @@ async function locateCellByScrolling(
   // search landed on a later, genuinely-narrower 4-column row instead, silently, with no error.
   let previousOutOfRangeRowId: string | null = null;
   let previousOutOfRangeCellCount = -1;
+  // Once a row is confirmed too narrow and excluded, the specific "found the row, but this
+  // column doesn't exist on it" diagnosis would otherwise be discarded: the next locate call
+  // searches with that row now excluded, and if it was the sole/last remaining anchor-text
+  // match, that call reports a bare row_not_found, a factually wrong answer (a cell with that
+  // exact text does exist, it was found and specifically confirmed too narrow). Kept here so a
+  // terminal row_not_found can fall back to the more specific, already-confirmed diagnosis
+  // instead of silently downgrading it to "no cell found" (see the two return sites below).
+  let lastExcludedNarrowRowDiagnosis: CellNotFound | null = null;
   let last: CellLocatorResult = { found: false, reason: 'row_not_found' };
   while (true) {
     if (Date.now() >= deadline) {
-      return last.found ? last : { ...last, timedOut: !stabilized };
+      if (last.found) return last;
+      return { ...(lastExcludedNarrowRowDiagnosis ?? last), timedOut: !stabilized };
     }
 
     last = await locateCell(session, rowAnchorText, columnOffset, excludeRowIds);
@@ -464,6 +483,7 @@ async function locateCellByScrolling(
         // found-but-wrong-occurrence match, and keep walking toward the requested occurrence,
         // rather than treating one narrow row anywhere in the document as a dead end for every
         // occurrence after it.
+        lastExcludedNarrowRowDiagnosis = last;
         excludeRowIds.push(last.rowId);
         previousOutOfRangeRowId = null;
         previousOutOfRangeCellCount = -1;
@@ -477,6 +497,9 @@ async function locateCellByScrolling(
     } else if (stabilized) {
       // No rowId to track per-row (a genuine row_not_found, or a column_out_of_range with no
       // row information at all): only the page-wide stabilization signal can end the search.
+      // A row_not_found here can mean "never existed" or "existed, was excluded for being too
+      // narrow, and nothing else matches", indistinguishable without the fallback below.
+      if (last.reason === 'row_not_found' && lastExcludedNarrowRowDiagnosis) return lastExcludedNarrowRowDiagnosis;
       return last;
     }
 
@@ -485,7 +508,12 @@ async function locateCellByScrolling(
       returnByValue: true,
     });
     const step = scrollResult?.result?.value ?? { found: false };
-    if (!step.found) return last; // no scrollable container at all
+    if (!step.found) {
+      // No scrollable container at all: same row_not_found-vs-excluded-narrow-row ambiguity as
+      // the stabilized branch above, same fallback.
+      if (last.reason === 'row_not_found' && lastExcludedNarrowRowDiagnosis) return lastExcludedNarrowRowDiagnosis;
+      return last; // no scrollable container at all
+    }
     // Quip mounts more content in one large batch only once the container actually reaches its
     // scroll boundary, not incrementally as the boundary is approached; shorter settle windows
     // after the jump were tried live and the batch had not landed yet, so 1500ms is empirical, not
