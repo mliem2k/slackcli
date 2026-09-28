@@ -37,7 +37,14 @@ export interface CanvasEditCellOptions {
   /** Which match to use when rowAnchorText is not unique in the document: 1-indexed, in
    *  top-to-bottom scroll order. Defaults to 1 (the first match). A long canvas commonly repeats
    *  the same short cell value (a name, a role) across several unrelated tables, so relying on
-   *  the first match alone risks silently editing the wrong row. */
+   *  the first match alone risks silently editing the wrong row.
+   *
+   *  Counts only rows where columnOffset actually resolves to a real cell, not every row whose
+   *  anchor text matches: a row too narrow for the requested column is skipped over silently and
+   *  does not consume a slot in the count, so it never has to be accounted for when picking this
+   *  number. Confirmed live: a two-column summary table sharing the anchor text with a run of
+   *  wider stand-up-table rows did not shift any of those rows' occurrence numbers, the caller
+   *  never needed to know it was there. */
   occurrence?: number;
   /** Cells to the right of the anchor cell within its row, 0 edits the anchor cell itself. */
   columnOffset: number;
@@ -68,6 +75,23 @@ interface CellNotFound {
    *  stopped changing across a jump). A caller must not tell the user the whole canvas was
    *  searched when this is true, since the row may still exist further down. */
   timedOut?: boolean;
+  /** Set on a `column_out_of_range` whose anchor cell WAS found (the row exists, its target
+   *  column does not, at least not yet). Lets the caller rule this exact row out and keep
+   *  walking toward the requested occurrence instead of retrying the same too-narrow row
+   *  forever: without it, a short row (fewer columns than the requested offset) that happens to
+   *  be occurrence 1 permanently blocks every later occurrence, since nothing ever advances past
+   *  it. See `locateCellByScrolling`'s handling of this field. */
+  rowId?: string;
+  /** The target row's own cell count at the moment of this `column_out_of_range`, set alongside
+   *  `rowId`. Whether a row is genuinely too narrow has to be judged against THIS row's own cell
+   *  count holding steady across two checks, not against the whole page's scroll metrics: a wide
+   *  row can still be mid-mount at a moment the page's aggregate scrollHeight/cellCount happens
+   *  to read as stabilized (two jumps landing on the same totals by coincidence, while this one
+   *  row's own cells are still being added), which wrongly excludes a genuinely-wide row that
+   *  just has not finished mounting yet, confirmed live: a 7-column row was excluded this way
+   *  and a later, narrower 4-column row that happened to already satisfy the same offset was
+   *  edited in its place, with no error, silently landing on the wrong row entirely. */
+  rowCellCount?: number;
 }
 type CellLocatorResult = CellFound | CellNotFound;
 
@@ -125,10 +149,10 @@ export function buildCellLocatorExpression(
     const rowCells = cells.filter((td) => td.getAttribute('data-row-id') === rowId);
     const targetIndex = rowCells.indexOf(anchorCell) + columnOffset;
     if (targetIndex < 0 || targetIndex >= rowCells.length) {
-      return { found: false, reason: 'column_out_of_range' };
+      return { found: false, reason: 'column_out_of_range', rowId, rowCellCount: rowCells.length };
     }
     const editable = rowCells[targetIndex].querySelector('.table-cell-content');
-    if (!editable) return { found: false, reason: 'column_out_of_range' };
+    if (!editable) return { found: false, reason: 'column_out_of_range', rowId, rowCellCount: rowCells.length };
     editable.scrollIntoView({ block: 'center', inline: 'center' });
     const rect = editable.getBoundingClientRect();
     return {
@@ -340,9 +364,33 @@ type ScrollStep =
  * Locate a cell in a virtualized canvas by scrolling down until it mounts into the DOM.
  *
  * Tries the locator first (covers the case where the target row is already on screen), then
- * alternates bottom-jump and re-locate until found, a definitive column_out_of_range (more
- * scrolling cannot fix that), no scrollable container exists at all, the jumps stop revealing
- * anything new, or the deadline passes. "Stops revealing anything new" is two consecutive jumps
+ * alternates bottom-jump and re-locate until found, no scrollable container exists at all, the
+ * jumps stop revealing anything new, or the deadline passes. A `column_out_of_range` result is
+ * NOT treated as definitive on its own, for two distinct reasons layered on top of each other.
+ *
+ * First, a row whose anchor cell is mounted can still have a trailing column not yet mounted, so
+ * a bare retry-without-scrolling would wrongly conclude the column does not exist. Whether that
+ * row is genuinely too narrow has to be judged against ITS OWN cell count holding steady across
+ * two checks of that specific row, tracked separately below, never against the page-wide
+ * `stabilized` signal: the whole page's aggregate scrollHeight/cellCount can read as stabilized
+ * (two jumps landing on the same totals) at a moment when one particular row is still mid-mount,
+ * if some unrelated part of the page happens to have settled first. Confirmed live: a real
+ * 7-column stand-up row was ruled out this way under an earlier version of this function that
+ * gated the decision on the page-wide signal, and the search silently landed on a later,
+ * genuinely-narrower 4-column row instead, with no error, editing the wrong week's cell.
+ *
+ * Second, once a row IS confirmed too narrow for the requested column, it still has to be ruled
+ * out and walked past via `excludeRowIds`, the same mechanism used for a found-but-wrong-
+ * occurrence match, or the whole search dead-ends on whichever narrow row happens to share the
+ * anchor text first in document order, permanently, regardless of the requested `occurrence`.
+ * Confirmed against a real canvas where a two-column summary table's own name cell was
+ * `occurrence` 1 for the anchor text used elsewhere for a seven-column stand-up table: every
+ * later, wider occurrence was unreachable until `buildCellLocatorExpression` started returning
+ * the offending row's `rowId` (and `rowCellCount`, for the first check above) on
+ * `column_out_of_range` too, letting it be excluded exactly like a matched-but-wrong-occurrence
+ * row once its own count is confirmed stable. The page-wide `stabilized` signal below is kept
+ * only as the fallback for a result with no row information at all (a genuine `row_not_found`).
+ * "Stops revealing anything new" is two consecutive jumps
  * measuring the same pre-jump scrollHeight AND the same mounted cell count: scrollHeight alone can
  * stay put across a real reveal if a mount batch's measured height happens to equal the placeholder
  * it replaced, so both signals have to agree before giving up. The container cannot report being at
@@ -355,8 +403,12 @@ type ScrollStep =
  * bottom document order, not just the first. A short cell value (a name, a role, a status word)
  * commonly repeats across unrelated tables in one long canvas (multiple weeks of the same
  * stand-up template, in the case this was built for), so always taking the first match risks
- * silently editing the wrong row's real data instead of the intended one. Matches already passed
- * over (found, but not yet the target occurrence) are tracked by their stable `rowId` in
+ * silently editing the wrong row's real data instead of the intended one. Only counts rows the
+ * requested `columnOffset` actually resolves on: a row whose anchor text matches but is too
+ * narrow for that offset is excluded (see above) WITHOUT incrementing `matchesSeen`, so it never
+ * consumes a slot in the count and the caller never has to know it exists or account for it when
+ * choosing this number. Matches already passed over, found and column-resolved but not yet the
+ * target occurrence, plus any row confirmed too narrow, are tracked by their stable `rowId` in
  * `excludeRowIds` so they are skipped on every subsequent locate call. This assumes a row's
  * `data-row-id` survives being unmounted and remounted by a later jump, true of every jump
  * observed live so far, not independently verified against Quip's own internals.
@@ -378,6 +430,16 @@ async function locateCellByScrolling(
   let previousScrollHeight = -1;
   let previousCellCount = -1;
   let stabilized = false;
+  // Tracks whether the LAST column_out_of_range's own row has already reported this exact same
+  // cell count once before, the per-row analog of the page-wide signal above. A row is only
+  // ruled out once ITS OWN cell count has held steady across two consecutive checks of THAT row
+  // specifically, never against the page's aggregate scrollHeight/cellCount: those can read as
+  // stabilized (two jumps landing on the same totals) at a moment when one particular row is
+  // still mid-mount, if some other part of the page happens to have settled first. Confirmed
+  // live: a 7-column row was ruled out this way while still only partially mounted, and the
+  // search landed on a later, genuinely-narrower 4-column row instead, silently, with no error.
+  let previousOutOfRangeRowId: string | null = null;
+  let previousOutOfRangeCellCount = -1;
   let last: CellLocatorResult = { found: false, reason: 'row_not_found' };
   while (true) {
     if (Date.now() >= deadline) {
@@ -391,12 +453,32 @@ async function locateCellByScrolling(
       // Not the occurrence we want: rule this row out and keep looking, without scrolling first,
       // in case another match is already mounted alongside this one in the current DOM.
       excludeRowIds.push(last.rowId);
+      previousOutOfRangeRowId = null;
+      previousOutOfRangeCellCount = -1;
       continue;
     }
-    if (last.reason === 'column_out_of_range') return last;
-    // The previous jump's settle window already produced this locate's DOM; if it also confirmed
-    // stabilization, this miss is a genuine, fully-searched absence, not one more thing to retry.
-    if (stabilized) return last;
+    if (last.reason === 'column_out_of_range' && last.rowId !== undefined && last.rowCellCount !== undefined) {
+      if (last.rowId === previousOutOfRangeRowId && last.rowCellCount === previousOutOfRangeCellCount) {
+        // This exact row's own cell count held steady across two checks of it specifically:
+        // genuinely too narrow, not just caught mid-mount. Rule it out, exactly like a
+        // found-but-wrong-occurrence match, and keep walking toward the requested occurrence,
+        // rather than treating one narrow row anywhere in the document as a dead end for every
+        // occurrence after it.
+        excludeRowIds.push(last.rowId);
+        previousOutOfRangeRowId = null;
+        previousOutOfRangeCellCount = -1;
+        continue;
+      }
+      // First time seeing this exact row report this exact cell count: not yet confirmed
+      // stable, fall through to the scroll step below and re-check the same row (still not
+      // excluded) rather than concluding anything about it yet.
+      previousOutOfRangeRowId = last.rowId;
+      previousOutOfRangeCellCount = last.rowCellCount;
+    } else if (stabilized) {
+      // No rowId to track per-row (a genuine row_not_found, or a column_out_of_range with no
+      // row information at all): only the page-wide stabilization signal can end the search.
+      return last;
+    }
 
     const scrollResult = await session.send<{ result?: { value?: ScrollStep } }>('Runtime.evaluate', {
       expression: SCROLL_CONTAINER_STEP_EXPRESSION,
