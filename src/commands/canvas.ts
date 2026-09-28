@@ -305,7 +305,7 @@ export function createCanvasCommand(): Command {
     .requiredOption('--row-anchor <text>', 'Exact text of an existing cell that identifies the target row')
     .option(
       '--occurrence <n>',
-      'Which match to use when --row-anchor text is not unique in the canvas, 1-indexed in top-to-bottom document order (default: 1, the first match). Run "canvas sections --contains-text" first to check how many matches exist before assuming 1 is correct.',
+      'Which match to use when --row-anchor text is not unique in the canvas, 1-indexed in top-to-bottom document order among rows where --column-offset actually resolves to a real cell (default: 1, the first such match). A row whose anchor text matches but is too narrow for --column-offset is skipped and does not count, so it never has to be accounted for when picking this number. Run "canvas sections --contains-text" first to check how many matches exist before assuming 1 is correct.',
       '1'
     )
     .requiredOption('--column-offset <n>', 'Cells to the right of the anchor cell to edit (0 edits the anchor cell itself)')

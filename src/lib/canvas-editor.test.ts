@@ -64,14 +64,14 @@ describe('buildCellLocatorExpression', () => {
     expect(result).toEqual({ found: false, reason: 'row_not_found' });
   });
 
-  it('reports column_out_of_range past the end of the row', () => {
+  it('reports column_out_of_range past the end of the row, with the row id and cell count so the caller can exclude it once confirmed stable', () => {
     const result = locate('Michael', 5, table);
-    expect(result).toEqual({ found: false, reason: 'column_out_of_range' });
+    expect(result).toEqual({ found: false, reason: 'column_out_of_range', rowId: 'row_1', rowCellCount: 3 });
   });
 
-  it('reports column_out_of_range before the start of the row', () => {
+  it('reports column_out_of_range before the start of the row, with the row id and cell count so the caller can exclude it once confirmed stable', () => {
     const result = locate('Michael', -1, table);
-    expect(result).toEqual({ found: false, reason: 'column_out_of_range' });
+    expect(result).toEqual({ found: false, reason: 'column_out_of_range', rowId: 'row_1', rowCellCount: 3 });
   });
 });
 
@@ -274,7 +274,10 @@ interface FakeOptions {
   loadReady?: boolean;
   /** Load check reports ready only once at least this many Page.navigate calls have fired. */
   loadReadyAfterNavigateCount?: number;
-  locatorResults: Array<{ found: true; x: number; y: number; currentText: string } | { found: false; reason: string }>;
+  locatorResults: Array<
+    | { found: true; x: number; y: number; currentText: string }
+    | { found: false; reason: string; rowId?: string; rowCellCount?: number }
+  >;
   /** Fire a matching request + response pair for the edit-document save right after the
    *  replacement text is typed, mirroring the real save-race fix: a save fired any earlier (on
    *  the click, mid-clear) is stale and must not satisfy the wait. */
@@ -617,6 +620,156 @@ describe('editCanvasCell', () => {
     expect(
       calls.filter((c) => c.method === 'Runtime.evaluate' && String(c.params?.expression).includes('scrollHeightBeforeJump'))
     ).toHaveLength(2);
+  });
+
+  it('recovers from column_out_of_range once a scroll step mounts the target column', async () => {
+    // Reproduces a real live bug: a row whose anchor cell is already mounted (found) but whose
+    // trailing cells are all still empty can report column_out_of_range for a cell that genuinely
+    // exists, simply because that cell's own .table-cell-content has not mounted yet. The old
+    // behavior treated this as definitive and returned immediately, without ever attempting the
+    // scroll step that (confirmed live) is exactly what makes the cell locatable.
+    const { session, calls } = makeFakeSession({
+      locatorResults: [
+        { found: false, reason: 'column_out_of_range' },
+        { found: false, reason: 'column_out_of_range' },
+        { found: true, x: 10, y: 20, currentText: '' },
+        { found: true, x: 10, y: 20, currentText: 'Done' },
+      ],
+      scrollStepsBeforeBottom: 5, // plenty of room; the cell mounts before the container stabilizes
+      fireSaveRequestOnInsertText: true,
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Michael',
+      columnOffset: 2,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    expect(result).toEqual({ ok: true, before: '', after: 'Done' });
+    // Two scroll jumps before the third locate call finds the target column.
+    expect(
+      calls.filter((c) => c.method === 'Runtime.evaluate' && String(c.params?.expression).includes('scrollHeightBeforeJump'))
+    ).toHaveLength(2);
+  });
+
+  it('rules out a narrower row past occurrence one instead of dead-ending the whole search', async () => {
+    // Reproduces a real live bug: a two-column summary table's own name cell can be occurrence 1
+    // for an anchor text also used, further down the canvas, by a much wider table's name column
+    // (a real Sprint canvas's Workload Summary row versus its own stand-up table row, both named
+    // by the same engineer). A column offset only valid on the wider row used to dead-end the
+    // WHOLE search the moment it first hit the narrower row, because column_out_of_range carried
+    // no rowId for the caller to exclude it by, so nothing ever advanced past occurrence 1
+    // regardless of how many wider occurrences existed later in the document.
+    const { session, calls } = makeFakeSession({
+      locatorResults: [
+        // Same rowId AND same rowCellCount twice in a row is what confirms this row is genuinely
+        // too narrow, independent of the page-wide scroll stabilization signal.
+        { found: false, reason: 'column_out_of_range', rowId: 'row-narrow', rowCellCount: 2 },
+        { found: false, reason: 'column_out_of_range', rowId: 'row-narrow', rowCellCount: 2 },
+        { found: true, x: 10, y: 20, currentText: '' },
+        { found: true, x: 10, y: 20, currentText: 'Done' },
+      ],
+      fireSaveRequestOnInsertText: true,
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Michael',
+      columnOffset: 2,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    expect(result).toEqual({ ok: true, before: '', after: 'Done' });
+    // One scroll jump between the two identical readings of the narrow row is enough to confirm
+    // it, well before the page-wide scroll signal would ever stabilize.
+    expect(
+      calls.filter((c) => c.method === 'Runtime.evaluate' && String(c.params?.expression).includes('scrollHeightBeforeJump'))
+    ).toHaveLength(1);
+  });
+
+  it('does not exclude a row whose own cell count is still growing, even once the page-wide scroll signal has stabilized', async () => {
+    // Reproduces the actual live bug this session found: the page-wide stabilization signal
+    // (the whole canvas's aggregate scrollHeight/cellCount) can read as unchanged across a jump
+    // at the same moment one specific row is still mid-mount, if some unrelated part of the page
+    // happened to settle first. A version of this function gated the exclusion decision on that
+    // page-wide signal alone and wrongly ruled row-growing out the moment the page-wide signal
+    // first stabilized (after 2 jumps here), regardless of row-growing's own cell count still
+    // visibly climbing (2, then 5, then 7). The fix keeps re-checking (and re-scrolling for) the
+    // SAME row until its own reading repeats, not the page's.
+    //
+    // The two versions converge on the identical final result value here (a downstream `found:
+    // true` entry the fake session serves next either way, since the fake has no real DOM to
+    // make exclusion actually filter anything out), so the property this pins is observable only
+    // in HOW MANY scroll jumps ran before that same entry was reached: the old, page-wide-gated
+    // version stops scrolling and excludes as soon as it sees stabilized=true (2 jumps), while
+    // the fix keeps scrolling until row-growing's own count repeats (3 jumps, since 7 is read
+    // twice only on the third and fourth locate calls). A regression back to gating on the
+    // page-wide signal alone would make this assert 2, not 3.
+    const { session, calls } = makeFakeSession({
+      locatorResults: [
+        { found: false, reason: 'column_out_of_range', rowId: 'row-growing', rowCellCount: 2 },
+        { found: false, reason: 'column_out_of_range', rowId: 'row-growing', rowCellCount: 5 },
+        { found: false, reason: 'column_out_of_range', rowId: 'row-growing', rowCellCount: 7 },
+        { found: true, x: 10, y: 20, currentText: '' },
+        { found: true, x: 10, y: 20, currentText: 'Done' },
+      ],
+      // The page-wide signal stabilizes after the second jump (it repeats the first jump's
+      // reading), long before row-growing's own cell count (2, then 5, then 7) stops climbing.
+      scrollStepsBeforeBottom: 2,
+      fireSaveRequestOnInsertText: true,
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Michael',
+      columnOffset: 2,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    expect(result).toEqual({ ok: true, before: '', after: 'Done' });
+    expect(
+      calls.filter((c) => c.method === 'Runtime.evaluate' && String(c.params?.expression).includes('scrollHeightBeforeJump'))
+    ).toHaveLength(3);
+  });
+
+  it('does not let an excluded too-narrow row shift the occurrence numbering of the rows after it', async () => {
+    // Reproduces a real live bug found immediately after the exclusion fix above shipped: a
+    // caller who requests occurrence 2 wants the SECOND row where columnOffset actually
+    // resolves, not the second anchor-text match counting a too-narrow row that never resolved
+    // at all. Ruling out row-narrow (see the test above) must not consume a slot in the count,
+    // or every occurrence past it silently shifts by one, exactly what happened live: a request
+    // for a specific week's row in a real Sprint stand-up canvas landed one row later than
+    // intended, because an unrelated two-column summary table earlier in the document happened
+    // to share the same anchor text and got excluded, but the exclusion itself was still being
+    // counted toward the occurrence the caller asked for.
+    const { session } = makeFakeSession({
+      locatorResults: [
+        { found: false, reason: 'column_out_of_range', rowId: 'row-narrow', rowCellCount: 2 },
+        { found: false, reason: 'column_out_of_range', rowId: 'row-narrow', rowCellCount: 2 },
+        { found: true, x: 10, y: 20, currentText: 'first-valid-row' },
+        { found: true, x: 10, y: 20, currentText: 'second-valid-row' },
+        { found: true, x: 10, y: 20, currentText: 'Done' },
+      ],
+      fireSaveRequestOnInsertText: true,
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Michael',
+      occurrence: 2,
+      columnOffset: 2,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    // If row-narrow's exclusion had counted toward the occurrence, this would have stopped at
+    // first-valid-row (the second anchor match overall) instead of second-valid-row (the second
+    // match where columnOffset actually resolves, which is what occurrence 2 is supposed to mean).
+    expect(result).toEqual({ ok: true, before: 'second-valid-row', after: 'Done' });
   });
 
   it('gives up with row_not_found once two consecutive jumps reveal nothing new', async () => {
