@@ -2,7 +2,16 @@ import { Command, Option } from 'commander';
 import ora from 'ora';
 import { readFile } from 'node:fs/promises';
 import { getAuthenticatedClient } from '../lib/auth.ts';
-import { fetchDrafts, loadActiveDraft, parseDraftLimit, sendDraft, validateSendableDraft } from '../lib/drafts.ts';
+import {
+  fetchActiveRawDrafts,
+  fetchDrafts,
+  findDraftById,
+  findDraftForDestination,
+  loadActiveDraft,
+  parseDraftLimit,
+  sendDraft,
+  validateSendableDraft,
+} from '../lib/drafts.ts';
 import { error, formatDraftList, success, warning, writeJson } from '../lib/formatter.ts';
 import { applyFields, fieldsOption, FIELDS_DESCRIPTION, FIELDS_FLAG } from '../lib/json-fields.ts';
 import {
@@ -22,7 +31,7 @@ import type { DryRunTarget } from '../types/index.ts';
 import { CHANNEL_NAME_NOTE, describeCommand, USER_NAME_NOTE, type CommandHelp } from '../lib/help.ts';
 import { confirmWrite } from './usergroups.ts';
 import { failCommand } from '../lib/command-errors.ts';
-import { InvalidInputError } from '../lib/cli-errors.ts';
+import { InvalidInputError, NotFoundError } from '../lib/cli-errors.ts';
 import { resolveIdentifier } from '../lib/name-resolver.ts';
 import { resolveMessageText } from '../lib/message-input.ts';
 
@@ -198,6 +207,19 @@ const HELP = {
     browserOnly: true,
     confirms: true,
     dryRun: true,
+  },
+  updateDraft: {
+    summary: 'Replace the text of an unsent draft',
+    description:
+      'Overwrite the text of an unsent draft in place, keeping its channel and thread. Get the draft ID from ' +
+      '"messages draft" or "messages list-drafts"; "messages draft --replace" does the same by destination.',
+    examples: [
+      'slackcli messages update-draft --draft-id Dr0123456789 --message "Revised text"',
+      'slackcli messages update-draft --draft-id Dr0123456789 --message-file ./reply.md --json',
+    ],
+    json: '{ draft_id, channel_id }.',
+    browserOnly: true,
+    notes: [MESSAGE_TEXT_NOTE, STDIN_NOTE],
   },
 } satisfies Record<string, CommandHelp>;
 
@@ -555,6 +577,7 @@ export function createMessagesCommand(): Command {
     )
     .option('--thread-ts <timestamp>', 'Thread to draft a reply in (1234567890.123456 or p1234567890123456)')
     .option('--permalink <url>', 'Slack message link; drafts a reply in that message\'s thread (replaces --recipient-id and --thread-ts)')
+    .option('--replace', 'Overwrite the unsent draft already in this channel or thread instead of failing with attached_draft_exists', false)
     .option('--workspace <id|name>', 'Workspace to use')
     .option('--json', 'Output the created draft as JSON', false)
     .option(DRY_RUN_FLAG, DRY_RUN_DESCRIPTION, false)
@@ -577,18 +600,33 @@ export function createMessagesCommand(): Command {
 
         const channelId = await openRecipient(client, recipientId, spinner);
 
-        spinner.text = 'Creating draft...';
-        const response = await client.createDraft(channelId, message, {
-          thread_ts: target.threadTs,
-        });
+        let response;
+        let replaced = false;
+        const existing = options.replace
+          ? findDraftForDestination(await fetchActiveRawDrafts(client), channelId, target.threadTs)
+          : undefined;
+        if (existing) {
+          spinner.text = 'Replacing the existing draft...';
+          response = await client.updateDraft(existing, message);
+          // drafts.update answers with the updated draft; keep the id we sent
+          // if a future Slack response omits it.
+          response = { ...response, draft: { ...(response.draft ?? {}), id: response.draft?.id ?? existing.id } };
+          replaced = true;
+        } else {
+          spinner.text = 'Creating draft...';
+          response = await client.createDraft(channelId, message, {
+            thread_ts: target.threadTs,
+          });
+        }
 
-        spinner.succeed('Draft created successfully!');
+        spinner.succeed(replaced ? 'Draft replaced successfully!' : 'Draft created successfully!');
         if (options.json) {
           // A draft is unsent, so it has no message ts and no permalink. The
           // draft id is what a follow-up call has to work with.
           writeJson({
             channel_id: channelId,
             draft_id: response.draft.id,
+            ...(replaced ? { replaced: true } : {}),
             ...(target.threadTs ? { thread_ts: target.threadTs } : {}),
           });
         } else {
@@ -676,6 +714,39 @@ export function createMessagesCommand(): Command {
         else success(`Deleted draft ${draftId}`);
       } catch (err: any) {
         failCommand(err, { json: options.json, spinner, context: 'Failed to delete draft' });
+      }
+    });
+
+  // Replace the text of one unsent draft by id
+  describeCommand(messages.command('update-draft'), HELP.updateDraft)
+    .requiredOption('--draft-id <id>', 'Draft id, from list-drafts or the draft command')
+    .option('--message <text>', 'New message text')
+    .addOption(
+      new Option('--message-file <path>', 'Read the new message text from a UTF-8 file, or stdin with -')
+        .conflicts('message')
+    )
+    .option('--workspace <id|name>', 'Workspace to use')
+    .option('--json', 'Output the updated draft as JSON', false)
+    .action(async (options) => {
+      const spinner = ora('Updating draft...').start();
+
+      try {
+        const message = await resolveMessageText(options);
+        const client = await getAuthenticatedClient(options.workspace);
+        const draft = findDraftById(await fetchActiveRawDrafts(client), options.draftId);
+        if (!draft) {
+          throw new NotFoundError(`No active draft ${options.draftId} found (it may have been sent or deleted)`);
+        }
+
+        await client.updateDraft(draft, message);
+        spinner.succeed('Draft updated successfully!');
+        if (options.json) {
+          writeJson({ draft_id: draft.id, channel_id: draft.destinations?.[0]?.channel_id });
+        } else {
+          success(`Draft ID: ${draft.id}`);
+        }
+      } catch (err: any) {
+        failCommand(err, { json: options.json, spinner, context: 'Failed to update draft' });
       }
     });
 

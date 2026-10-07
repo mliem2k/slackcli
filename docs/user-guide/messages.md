@@ -345,3 +345,30 @@ already-sent entries are excluded, and an empty result is successful with
 
 - [Slack links and timestamps](links-and-timestamps.md) — what `--permalink` accepts
 - [Scripting and JSON output](scripting.md) — capturing timestamps in a script
+
+## Replacing and deleting drafts
+
+Slack keeps one unsent draft per destination (a channel, or one thread inside it), so a
+second `messages draft` to the same place fails with `attached_draft_exists`. Three ways
+to change a draft instead of working around it (the third is `delete-draft`, covered above):
+
+```bash
+# Overwrite the draft already in this channel or thread (creates one if there is none)
+slackcli messages draft --recipient-id=C1234567890 --message-file=./v2.md --replace
+
+# Replace the text of a draft by id (ids come from list-drafts or the draft command)
+slackcli messages update-draft --draft-id=Dr0123456789 --message="New text"
+```
+
+`--replace` matches the destination exactly: a channel draft is only replaced by a channel
+draft, and a thread draft only by a draft for the same `--thread-ts`. `update-draft` looks
+the draft up first and fail with a clear error when no active draft has
+that id (it may have been sent or deleted). `--json` prints `{draft_id, channel_id}` for an
+update, and adds `"replaced": true` to the
+`draft` output when an existing draft was overwritten.
+
+**Browser auth only**, like the other draft commands, and these use undocumented web-client
+endpoints (`drafts.update`). One detail worth knowing if they ever break:
+Slack wants the client's own current timestamp as `client_last_updated_ts`, later than the
+draft's `last_updated_ts`. Echoing the draft's own value back is rejected with
+`draft_has_conflict`.

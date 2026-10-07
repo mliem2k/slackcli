@@ -1,9 +1,12 @@
 import { Command } from 'commander';
 import ora, { type Ora } from 'ora';
+import { readFile } from 'node:fs/promises';
 import { getAuthenticatedClient } from '../lib/auth.ts';
-import { error, formatCanvasList, formatCanvasContent, warning, writeJson } from '../lib/formatter.ts';
+import { error, success, formatCanvasList, formatCanvasContent, warning, writeJson } from '../lib/formatter.ts';
 import { applyFields, fieldsOption, FIELDS_DESCRIPTION, FIELDS_FLAG } from '../lib/json-fields.ts';
-import { canvasHtmlToMarkdown } from '../lib/canvas-parser.ts';
+import { getWorkspace } from '../lib/workspaces.ts';
+import { editCanvasCellAuto } from '../lib/canvas-editor.ts';
+import { canvasHtmlToMarkdown, canvasEditPersisted } from '../lib/canvas-parser.ts';
 import {
   applyCanvasMentions,
   CanvasReadError,
@@ -14,7 +17,7 @@ import {
 import { normalizeIdentifier, workspaceMismatchWarning, workspaceOf } from '../lib/slack-url-parser.ts';
 import type { SlackClient } from '../lib/slack-client.ts';
 import { resolveIdentifier } from '../lib/name-resolver.ts';
-import type { SlackCanvas } from '../types/index.ts';
+import type { SlackCanvas, CanvasEditChange } from '../types/index.ts';
 import { CHANNEL_NAME_NOTE, describeCommand, type CommandHelp } from '../lib/help.ts';
 import { failCommand } from '../lib/command-errors.ts';
 import { InvalidInputError } from '../lib/cli-errors.ts';
@@ -68,7 +71,51 @@ const HELP = {
       'A channel without a canvas is reported on stderr with exit 0 and no stdout. An unknown canvas ID exits 1 with Slack\'s error.',
     ],
   },
+  sections: {
+    summary: 'Find sections within a canvas',
+    description:
+      'Look up the section IDs of a canvas, by text they contain or by section type, to target them with ' +
+      '"canvas edit". Needs a token Slack accepts for canvases.sections.lookup.',
+    examples: [
+      'slackcli canvas sections F0123456789 --contains-text "Action items"',
+      'slackcli canvas sections F0123456789 --types h1,h2 --json',
+    ],
+    json: '{ sections: [{ id }] }.',
+  },
+  edit: {
+    summary: 'Apply one change operation to a canvas',
+    description:
+      'Insert, replace or delete one section of a canvas with a single canvases.edit operation. ' +
+      'Slack rejects this call for browser session tokens; use "canvas edit-cell" to change a table cell.',
+    examples: [
+      'slackcli canvas edit F0123456789 --operation insert_at_end --markdown "Next steps"',
+      'slackcli canvas edit F0123456789 --operation replace --section-id temp:C:abc --markdown-file ./section.md --json',
+    ],
+    json: 'The Slack canvases.edit response.',
+    notes: ['--section-id is required for every operation except insert_at_start and insert_at_end.'],
+  },
+  editCell: {
+    summary: 'Edit one table cell by driving a real browser',
+    description:
+      'Set one table cell of a canvas by driving a signed-in browser, for workspaces where canvases.edit is ' +
+      'blocked. The cell is found by the exact text of another cell in its row, and the edit is confirmed only ' +
+      'once Slack has saved it.',
+    examples: [
+      'slackcli canvas edit-cell F0123456789 --row-anchor "Michael" --column-offset 1 --text "fix: [F22-1234] summary"',
+      'slackcli canvas edit-cell F0123456789 --row-anchor "Michael" --occurrence 2 --column-offset 2 --text "" --json',
+    ],
+    json: 'The edit result: the cell located, the text written and whether the save persisted.',
+    notes: [
+      'Pass a real newline in --text (for example with $\'one\\ntwo\') to write several lines into one cell.',
+      '--headless only works when the browser profile is already signed in.',
+    ],
+  },
 } satisfies Record<string, CommandHelp>;
+
+const CANVAS_ID_PATTERN = /^F[A-Z0-9]+$/i;
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+const EDIT_OPERATIONS = ['insert_after', 'insert_before', 'insert_at_start', 'insert_at_end', 'replace', 'delete'] as const;
+type EditOperation = typeof EDIT_OPERATIONS[number];
 
 // Warn when a pasted link points at a different workspace than the one we will call,
 // rather than letting Slack answer with a misleading not-found error.
@@ -239,6 +286,235 @@ export function createCanvasCommand(): Command {
         console.log('\n' + formatCanvasContent(file, markdown));
       } catch (err: any) {
         reportCanvasReadFailure(spinner, err, options.json);
+      }
+    });
+
+  // Find sections within a canvas, to get the section_id an edit needs to target
+  describeCommand(canvas.command('sections'), HELP.sections)
+    .argument('<canvas-id>', 'Canvas file ID (e.g., F1234567890)')
+    .option('--contains-text <text>', 'Only return sections whose content contains this text')
+    .option('--types <types>', 'Comma-separated section types to match (e.g., h1,h2,default_section)')
+    .option('--workspace <id|name>', 'Workspace to use')
+    .option('--json', 'Output in JSON format', false)
+    .action(async (canvasId, options) => {
+      const spinner = ora('Looking up canvas sections...').start();
+
+      try {
+        if (!CANVAS_ID_PATTERN.test(canvasId)) {
+          spinner.fail('Invalid canvas ID');
+          error('Canvas ID must start with F followed by alphanumeric characters (e.g., F1234567890).');
+          process.exit(1);
+        }
+
+        const client = await getAuthenticatedClient(options.workspace);
+
+        const criteria: { section_types?: string[]; contains_text?: string } = {};
+        if (options.types) criteria.section_types = options.types.split(',').map((t: string) => t.trim());
+        if (options.containsText) criteria.contains_text = options.containsText;
+
+        const response = await client.lookupCanvasSections(canvasId, criteria);
+        const sections = response.sections || [];
+
+        if (sections.length === 0) {
+          spinner.succeed('No matching sections found');
+          return;
+        }
+
+        spinner.succeed(`Found ${sections.length} section(s)`);
+
+        if (options.json) {
+          writeJson({ sections });
+          return;
+        }
+
+        for (const section of sections) {
+          console.log(`  ${section.id}${section.section_type ? ` (${section.section_type})` : ''}`);
+        }
+      } catch (err: any) {
+        spinner.fail('Failed to look up canvas sections');
+        error(err.message);
+        process.exit(1);
+      }
+    });
+
+  // Apply one change operation to a canvas document
+  describeCommand(canvas.command('edit'), HELP.edit)
+    .argument('<canvas-id>', 'Canvas file ID (e.g., F1234567890)')
+    .requiredOption('--operation <operation>', `Change operation: ${EDIT_OPERATIONS.join(', ')}`)
+    .option('--section-id <id>', 'Target section ID (required for every operation except insert_at_start/insert_at_end)')
+    .option('--markdown <text>', 'Markdown content for insert/replace operations')
+    .option('--markdown-file <path>', 'Read markdown content from a file instead of --markdown')
+    .option('--workspace <id|name>', 'Workspace to use')
+    .option('--json', 'Output in JSON format', false)
+    .action(async (canvasId, options) => {
+      const spinner = ora('Applying canvas edit...').start();
+
+      try {
+        if (!CANVAS_ID_PATTERN.test(canvasId)) {
+          spinner.fail('Invalid canvas ID');
+          error('Canvas ID must start with F followed by alphanumeric characters (e.g., F1234567890).');
+          process.exit(1);
+        }
+
+        const operation = options.operation as string;
+        if (!EDIT_OPERATIONS.includes(operation as EditOperation)) {
+          spinner.fail('Invalid operation');
+          error(`Operation must be one of: ${EDIT_OPERATIONS.join(', ')}`);
+          process.exit(1);
+        }
+
+        if (operation !== 'insert_at_start' && operation !== 'insert_at_end' && !options.sectionId) {
+          spinner.fail('Missing --section-id');
+          error(`--section-id is required for the ${operation} operation. Use "canvas sections" to find it.`);
+          process.exit(1);
+        }
+
+        let markdown: string | undefined = options.markdown;
+        if (options.markdownFile) {
+          markdown = await readFile(options.markdownFile, 'utf-8');
+        }
+
+        if (operation !== 'delete' && !markdown) {
+          spinner.fail('Missing content');
+          error(`--markdown or --markdown-file is required for the ${operation} operation.`);
+          process.exit(1);
+        }
+
+        const change: CanvasEditChange = { operation: operation as EditOperation };
+        if (options.sectionId) change.section_id = options.sectionId;
+        if (operation !== 'delete') {
+          change.document_content = { type: 'markdown', markdown: markdown! };
+        }
+
+        const client = await getAuthenticatedClient(options.workspace);
+        const response = await client.editCanvas(canvasId, [change]);
+
+        spinner.succeed('Canvas updated');
+
+        if (options.json) {
+          writeJson(response);
+          return;
+        }
+
+        success(`Applied ${operation} to ${canvasId}`);
+      } catch (err: any) {
+        spinner.fail('Failed to edit canvas');
+        error(err.message);
+        process.exit(1);
+      }
+    });
+
+  // Edit one table cell by driving a real browser. `canvas edit` above hits
+  // canvases.edit, which Slack rejects for xoxc/xoxd session tokens
+  // (not_allowed_token_type); this works around that for the one shape of
+  // edit that comes up in practice, setting a cell in an existing table.
+  describeCommand(canvas.command('edit-cell'), HELP.editCell)
+    .argument('<canvas-id>', 'Canvas file ID (e.g., F1234567890)')
+    .requiredOption('--row-anchor <text>', 'Exact text of an existing cell that identifies the target row')
+    .option(
+      '--occurrence <n>',
+      'Which match to use when --row-anchor text is not unique in the canvas, 1-indexed in top-to-bottom document order among rows where --column-offset actually resolves to a real cell (default: 1, the first such match). A row whose anchor text matches but is too narrow for --column-offset is skipped and does not count, so it never has to be accounted for when picking this number. Run "canvas sections --contains-text" first to check how many matches exist before assuming 1 is correct.',
+      '1'
+    )
+    .requiredOption('--column-offset <n>', 'Cells to the right of the anchor cell to edit (0 edits the anchor cell itself)')
+    .requiredOption('--text <text>', 'Replacement text for the target cell (pass "" to clear it)')
+    .option('--headless', 'Run without a visible browser window (only works if already signed in)')
+    .option('--workspace <id|name>', 'Workspace to use')
+    .option('--json', 'Output in JSON format', false)
+    .action(async (canvasId, options) => {
+      const spinner = ora('Opening a browser to edit the canvas...').start();
+
+      try {
+        if (!CANVAS_ID_PATTERN.test(canvasId)) {
+          spinner.fail('Invalid canvas ID');
+          error('Canvas ID must start with F followed by alphanumeric characters (e.g., F1234567890).');
+          process.exit(1);
+        }
+
+        const columnOffset = parseInt(options.columnOffset, 10);
+        if (!Number.isFinite(columnOffset) || String(columnOffset) !== options.columnOffset.trim()) {
+          spinner.fail('Invalid --column-offset');
+          error('--column-offset must be an integer.');
+          process.exit(1);
+        }
+
+        const occurrence = parseInt(options.occurrence, 10);
+        if (!Number.isFinite(occurrence) || String(occurrence) !== options.occurrence.trim() || occurrence < 1) {
+          spinner.fail('Invalid --occurrence');
+          error('--occurrence must be a positive integer (1 = the first match).');
+          process.exit(1);
+        }
+
+        const workspace = await getWorkspace(options.workspace);
+        if (!workspace) {
+          spinner.fail('No workspace configured');
+          error(
+            options.workspace
+              ? `Workspace not found: ${options.workspace}`
+              : 'No workspace configured. Run "slackcli auth login-auto" first.'
+          );
+          process.exit(1);
+        }
+
+        const canvasUrl = `https://app.slack.com/client/${workspace.workspace_id}/unified-files/doc/${canvasId}`;
+
+        const result = await editCanvasCellAuto(
+          { canvasUrl, rowAnchorText: options.rowAnchor, occurrence, columnOffset, text: options.text },
+          { headless: options.headless === true }
+        );
+
+        if (!result.ok) {
+          spinner.fail('Canvas edit failed');
+          error(result.message);
+          process.exit(1);
+        }
+
+        // Belt and suspenders: editCanvasCellAuto already confirms the save via the in-browser
+        // network response, but that alone has been observed to report success for an edit that
+        // is not actually what ends up persisted, most likely several debounced saves from a
+        // multi-keystroke clear racing each other server-side. Re-fetching through the same REST
+        // path `canvas read` uses is a genuinely separate confirmation, not just a second look at
+        // the same browser session, and empirically needs real time (rapid retries too soon see
+        // stale content), so this polls with real delay rather than checking once.
+        spinner.text = 'Confirming the edit actually persisted...';
+        const client = await getAuthenticatedClient(options.workspace);
+        let persisted = false;
+        for (let attempt = 0; attempt < 6; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          try {
+            const fileInfo = await client.getFileInfo(canvasId);
+            const downloadUrl = fileInfo.file?.url_private_download || fileInfo.file?.url_private;
+            if (!downloadUrl) continue;
+            const html = await client.downloadFile(downloadUrl, MAX_FILE_SIZE);
+            const markdown = canvasHtmlToMarkdown(html);
+            const matches = canvasEditPersisted(markdown, options.text, result.before);
+            if (matches) {
+              persisted = true;
+              break;
+            }
+          } catch {
+            // Transient fetch failure, the retry loop covers it.
+          }
+        }
+
+        if (!persisted) {
+          spinner.fail('Canvas edit did not persist');
+          error(
+            'The browser reported a successful save, but re-fetching the canvas does not show the new text. ' +
+              'Run "slackcli canvas read" to check the live state before retrying.'
+          );
+          process.exit(1);
+        }
+
+        spinner.succeed(`Cell updated and confirmed persisted: "${result.before}" to "${result.after}"`);
+
+        if (options.json) {
+          writeJson(result);
+        }
+      } catch (err: any) {
+        spinner.fail('Failed to edit canvas cell');
+        error(err.message);
+        process.exit(1);
       }
     });
 

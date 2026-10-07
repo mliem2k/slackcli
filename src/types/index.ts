@@ -141,6 +141,10 @@ export interface SlackDraftDestination {
 
 export interface SlackDraft {
   id?: string;
+  // Slack's optimistic-concurrency token for a draft: drafts.update and
+  // drafts.delete both send it back as client_last_updated_ts.
+  last_updated_ts?: string;
+  client_msg_id?: string;
   date_created?: number;
   date_scheduled?: number;
   file_ids?: string[];
@@ -381,6 +385,25 @@ export interface SlackCanvas {
   url_private?: string;
   url_private_download?: string;
   permalink?: string;
+}
+
+// A section returned by canvases.sections.lookup: a targetable region of a
+// canvas document that a canvases.edit change can reference by section_id.
+export interface SlackCanvasSection {
+  id: string;
+  section_type?: string;
+}
+
+// One change operation for canvases.edit. section_id is required for every
+// operation except insert_at_start/insert_at_end, which apply to the whole
+// document rather than a specific section.
+export interface CanvasEditChange {
+  operation: 'insert_after' | 'insert_before' | 'insert_at_start' | 'insert_at_end' | 'replace' | 'delete';
+  section_id?: string;
+  document_content?: {
+    type: 'markdown';
+    markdown: string;
+  };
 }
 
 export interface CanvasListOptions {

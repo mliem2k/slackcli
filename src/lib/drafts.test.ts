@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import {
   extractDraftText,
+  fetchActiveRawDrafts,
   fetchDrafts,
   findActiveDraft,
   loadActiveDraft,
+  findDraftById,
+  findDraftForDestination,
   parseDraftLimit,
   projectDraft,
   sendDraft,
@@ -313,5 +316,52 @@ describe('draft lifecycle', () => {
     expect(await sendDraft(client, 'Dr123', sendableDraft)).toEqual({
       channel_id: 'C123', ts: '1700000001.000002', cleanup_error: 'draft_has_conflict',
     });
+  });
+});
+
+describe('finding drafts to replace or delete', () => {
+  const channelDraft = { id: 'DrChannel', last_updated_ts: '10.000000', destinations: [{ channel_id: 'C1' }] };
+  const threadDraft = {
+    id: 'DrThread',
+    last_updated_ts: '20.000000',
+    destinations: [{ channel_id: 'C1', thread_ts: '1.000000', broadcast: false }],
+  };
+  const otherChannel = { id: 'DrOther', last_updated_ts: '30.000000', destinations: [{ channel_id: 'C2' }] };
+  const all = [channelDraft, threadDraft, otherChannel];
+
+  it('matches a channel draft only when no thread is asked for, and a thread draft only for that thread', () => {
+    expect(findDraftForDestination(all, 'C1')?.id).toBe('DrChannel');
+    expect(findDraftForDestination(all, 'C1', '1.000000')?.id).toBe('DrThread');
+    expect(findDraftForDestination(all, 'C1', '2.000000')).toBeUndefined();
+    expect(findDraftForDestination(all, 'C3')).toBeUndefined();
+  });
+
+  it('takes the newest when Slack returns several for one destination', () => {
+    const newer = { ...channelDraft, id: 'DrNewer', last_updated_ts: '99.000000' };
+
+    expect(findDraftForDestination([channelDraft, newer], 'C1')?.id).toBe('DrNewer');
+  });
+
+  it('finds a draft by id', () => {
+    expect(findDraftById(all, 'DrOther')?.id).toBe('DrOther');
+    expect(findDraftById(all, 'Missing')).toBeUndefined();
+  });
+
+  it('keeps only still-unsent drafts, with the fields update and delete need', async () => {
+    const client = {
+      listDrafts: async () => ({
+        ok: true,
+        drafts: [
+          channelDraft,
+          { ...threadDraft, id: 'DrDeleted', is_deleted: true },
+          { ...otherChannel, id: 'DrSent', is_sent: true },
+        ],
+      }),
+    };
+
+    const drafts = await fetchActiveRawDrafts(client);
+
+    expect(drafts.map((draft) => draft.id)).toEqual(['DrChannel']);
+    expect(drafts[0]?.last_updated_ts).toBe('10.000000');
   });
 });

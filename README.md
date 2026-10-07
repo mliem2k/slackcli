@@ -322,10 +322,12 @@ slackcli messages draft --recipient-id=C123 --message="Draft for later"
 slackcli messages list-drafts --json
 slackcli messages send-draft Dr123 --yes --json               # post, then remove draft
 slackcli messages delete-draft Dr456 --yes                    # discard draft
+slackcli messages draft --recipient-id=C123 --message-file=./v2.md --replace   # overwrite the draft already there
+slackcli messages update-draft --draft-id=Dr0123 --message="New text"
 ```
 
 > [!NOTE]
-> Draft commands require browser session tokens. Slack exposes
+> Draft commands (including `update-draft` and `draft --replace`) require browser session tokens. Slack exposes
 > no public API for drafts, so these commands use undocumented web-client endpoints that
 > may change without notice.
 

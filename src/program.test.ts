@@ -15,6 +15,7 @@ const BROWSER_ONLY = new Set([
   'slackcli messages draft',
   'slackcli messages send-draft',
   'slackcli messages delete-draft',
+  'slackcli messages update-draft',
 ]);
 
 // Every command that writes to Slack takes --dry-run (#328). A new write

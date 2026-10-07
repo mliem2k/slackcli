@@ -6,8 +6,10 @@ import { readFile, stat } from 'node:fs/promises';
 import type {
   DryRunWorkspace,
   SlackAuthTestResponse,
+  SlackDraft,
   SlackDraftListResponse,
   WorkspaceConfig,
+  CanvasEditChange,
 } from '../types/index.ts';
 import { parseMrkdwn } from './mrkdwn.ts';
 import { extractSlackWorkspaceName } from './curl-parser.ts';
@@ -566,6 +568,39 @@ export class SlackClient {
     return this.request('drafts.create', params);
   }
 
+  // The value Slack wants as client_last_updated_ts is the CLIENT's clock for this
+  // change, not an echo of the draft's last_updated_ts: sending the server's own
+  // value back is rejected with draft_has_conflict (observed live), while a
+  // current timestamp is accepted. It must also be later than the draft's own
+  // last_updated_ts, so a clock that runs behind Slack's cannot lose that race.
+  static clientTimestampAfter(lastUpdatedTs: string, nowMs: number = Date.now()): string {
+    const next = Math.max(nowMs / 1000, Number(lastUpdatedTs) + 0.000001);
+    return next.toFixed(6);
+  }
+
+  // Replace the text of an existing draft in place, keeping its destination. The
+  // draft comes from drafts.list because the update needs its id and destinations.
+  async updateDraft(draft: SlackDraft, text: string): Promise<any> {
+    if (this.config.auth_type === 'standard') {
+      throw new Error('Draft update requires browser authentication');
+    }
+    if (!draft.id || !draft.last_updated_ts || !draft.destinations?.length) {
+      throw new Error('Slack returned a draft without the id, last_updated_ts and destinations an update needs');
+    }
+
+    const params: Record<string, any> = {
+      draft_id: draft.id,
+      client_last_updated_ts: SlackClient.clientTimestampAfter(draft.last_updated_ts),
+      client_msg_id: draft.client_msg_id ?? crypto.randomUUID(),
+      blocks: JSON.stringify(parseMrkdwn(text)),
+      destinations: JSON.stringify(draft.destinations),
+      file_ids: '[]',
+      is_from_composer: 'false',
+    };
+
+    return this.request('drafts.update', params);
+  }
+
   // List active drafts (browser auth only; Slack has no public API for drafts).
   async listDrafts(options: { limit?: number } = {}): Promise<SlackDraftListResponse> {
     this.requireBrowserAuth(DRAFT_LIST_AUTH_MESSAGE);
@@ -998,6 +1033,33 @@ export class SlackClient {
     if (canvasTab?.data?.file_id) return canvasTab.data.file_id;
 
     return null;
+  }
+
+  // Find sections within a canvas matching the given criteria, so a
+  // canvases.edit change can target one by section_id without having to
+  // parse the whole document structure client-side.
+  async lookupCanvasSections(canvasId: string, criteria: {
+    section_types?: string[];
+    contains_text?: string;
+  } = {}): Promise<any> {
+    const normalizedCriteria: Record<string, any> = {};
+    if (criteria.section_types) normalizedCriteria.section_types = criteria.section_types;
+    if (criteria.contains_text) {
+      normalizedCriteria.contains_text = { text: criteria.contains_text };
+    }
+
+    return this.request('canvases.sections.lookup', {
+      canvas_id: canvasId,
+      criteria: JSON.stringify(normalizedCriteria),
+    });
+  }
+
+  // Apply one or more change operations to a canvas document.
+  async editCanvas(canvasId: string, changes: CanvasEditChange[]): Promise<any> {
+    return this.request('canvases.edit', {
+      canvas_id: canvasId,
+      changes: JSON.stringify(changes),
+    });
   }
 
   // Check auth type
