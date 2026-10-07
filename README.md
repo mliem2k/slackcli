@@ -326,6 +326,8 @@ slackcli messages edit --channel-id=C123 --timestamp=1234567890.123456 --message
 slackcli messages delete --permalink="$LINK" --yes --json        # already gone → exit 0
 slackcli messages draft --recipient-id=C123 --message="Draft for later"
 slackcli messages list-drafts --json
+slackcli messages draft --recipient-id=C123 --message-file=./v2.md --replace   # overwrite the draft already there
+slackcli messages update-draft --draft-id=Dr123 --message="New text"
 slackcli messages send-draft Dr123 --yes --json               # post, then remove draft
 slackcli messages delete-draft Dr456 --yes                    # discard draft
 slackcli messages schedule --recipient-id=C123 --message="Standup in 10" --at="2026-10-12 09:50"

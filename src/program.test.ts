@@ -13,6 +13,7 @@ import { createProgram } from './program.ts';
 const BROWSER_ONLY = new Set([
   'slackcli messages list-drafts',
   'slackcli messages draft',
+  'slackcli messages update-draft',
   'slackcli messages send-draft',
   'slackcli messages delete-draft',
   'slackcli emoji add',
@@ -47,6 +48,7 @@ const SLACK_WRITES = new Set([
   'slackcli messages react',
   'slackcli messages unreact',
   'slackcli messages draft',
+  'slackcli messages update-draft',
   'slackcli messages send-draft',
   'slackcli messages delete-draft',
   'slackcli messages schedule',
