@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Update a draft and overwrite one with `--replace`**: `messages update-draft --draft-id <id> --message <text>` (or `--message-file`) replaces the text of an unsent draft in place and keeps its channel or thread, and `messages draft --replace` overwrites the draft already in that channel or thread instead of failing with `attached_draft_exists`. Browser session tokens only; `update-draft` takes `--json` and `--dry-run`
+
 ## [0.19.0] - 2026-11-01
 
 ### Removed
