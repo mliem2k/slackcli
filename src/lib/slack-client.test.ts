@@ -49,6 +49,14 @@ class TestSlackClient extends SlackClient {
       return { ok: true, drafts: [], files: [], has_more: false };
     }
 
+    if (method === 'drafts.update') {
+      return { ok: true, draft: { id: params.draft_id } };
+    }
+
+    if (method === 'drafts.delete') {
+      return { ok: true };
+    }
+
     if (method === 'conversations.members') {
       return {
         ok: true,
@@ -297,6 +305,77 @@ describe('SlackClient.listDrafts', () => {
 
     await expect(client.listDrafts({ limit: 100 }))
       .rejects.toThrow('Draft listing requires browser authentication');
+  });
+});
+
+describe('SlackClient.updateDraft and deleteDraft', () => {
+  const draft = {
+    id: 'Dr123',
+    last_updated_ts: '1791356033.208141',
+    client_msg_id: 'msg-1',
+    destinations: [{ channel_id: 'C1', thread_ts: '1791289274.671509', broadcast: false }],
+  };
+
+  it('updates in place, keeping the destination and sending a client timestamp later than the draft\'s', async () => {
+    const client = new TestSlackClient();
+
+    await client.updateDraft(draft, 'new text');
+
+    const call = client.calls[0]!;
+    expect(call.method).toBe('drafts.update');
+    expect(call.params.draft_id).toBe('Dr123');
+    expect(call.params.client_msg_id).toBe('msg-1');
+    expect(JSON.parse(call.params.destinations as string)).toEqual(draft.destinations);
+    expect(JSON.parse(call.params.blocks as string)[0].type).toBe('rich_text');
+    // Echoing the server's own last_updated_ts is rejected with draft_has_conflict.
+    expect(call.params.client_last_updated_ts).not.toBe(draft.last_updated_ts);
+    expect(Number(call.params.client_last_updated_ts)).toBeGreaterThan(Number(draft.last_updated_ts));
+  });
+
+  it('deletes with the same later client timestamp', async () => {
+    const client = new TestSlackClient();
+
+    await client.deleteDraft(draft);
+
+    const call = client.calls[0]!;
+    expect(call.method).toBe('drafts.delete');
+    expect(call.params.draft_id).toBe('Dr123');
+    expect(Number(call.params.client_last_updated_ts)).toBeGreaterThan(Number(draft.last_updated_ts));
+  });
+
+  it('never goes backwards when this machine\'s clock is behind Slack\'s', () => {
+    // 100 seconds behind the draft's own timestamp.
+    const behind = (1791356033.208141 - 100) * 1000;
+
+    const ts = SlackClient.clientTimestampAfter('1791356033.208141', behind);
+
+    expect(Number(ts)).toBeGreaterThan(1791356033.208141);
+    expect(ts).toMatch(/^\d+\.\d{6}$/);
+  });
+
+  it('uses the current time when it is already later', () => {
+    expect(SlackClient.clientTimestampAfter('100.000000', 2_000_000_000_000)).toBe('2000000000.000000');
+  });
+
+  it('refuses a draft that lacks what the call needs before making any request', async () => {
+    const client = new TestSlackClient();
+
+    await expect(client.updateDraft({ id: 'Dr1' }, 'x')).rejects.toThrow('last_updated_ts');
+    await expect(client.deleteDraft({ id: 'Dr1' })).rejects.toThrow('last_updated_ts');
+    expect(client.calls).toEqual([]);
+  });
+
+  it('fails before any request when the workspace uses standard authentication', async () => {
+    const client = new SlackClient({
+      workspace_id: 'T123',
+      workspace_name: 'Test Workspace',
+      auth_type: 'standard',
+      token: 'xoxb-test',
+      token_type: 'bot',
+    });
+
+    await expect(client.updateDraft(draft, 'x')).rejects.toThrow('Draft update requires browser authentication');
+    await expect(client.deleteDraft(draft)).rejects.toThrow('Draft deletion requires browser authentication');
   });
 });
 

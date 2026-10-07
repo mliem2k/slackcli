@@ -117,6 +117,18 @@ describe('messages command', () => {
     }
   });
 
+  it('lets draft overwrite the draft already in the destination instead of failing', () => {
+    expect(longOptions('draft')).toContain('--replace');
+  });
+
+  it('exposes update-draft and delete-draft by draft id, with the draft id mandatory', () => {
+    expect(subcommand('update-draft')).toBeDefined();
+    expect(subcommand('delete-draft')).toBeDefined();
+    expect(mandatoryOptions('update-draft')).toEqual(['--draft-id']);
+    expect(mandatoryOptions('delete-draft')).toEqual(['--draft-id']);
+    expect(longOptions('update-draft')).toEqual(expect.arrayContaining(['--message', '--message-file']));
+  });
+
   it('exposes list-drafts as a browser-only read command with limit, workspace, and JSON options', () => {
     const command = subcommand('list-drafts');
     expect(command).toBeDefined();

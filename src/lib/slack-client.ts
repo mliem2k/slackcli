@@ -3,6 +3,7 @@ import { basename } from 'node:path';
 import { readFile, stat } from 'node:fs/promises';
 import type {
   SlackAuthTestResponse,
+  SlackDraft,
   SlackDraftListResponse,
   WorkspaceConfig,
   CanvasEditChange,
@@ -288,6 +289,54 @@ export class SlackClient {
     };
 
     return this.request('drafts.create', params);
+  }
+
+  // The value Slack wants as client_last_updated_ts is the CLIENT's clock for this
+  // change, not an echo of the draft's last_updated_ts: sending the server's own
+  // value back is rejected with draft_has_conflict (observed live), while a
+  // current timestamp is accepted. It must also be later than the draft's own
+  // last_updated_ts, so a clock that runs behind Slack's cannot lose that race.
+  static clientTimestampAfter(lastUpdatedTs: string, nowMs: number = Date.now()): string {
+    const next = Math.max(nowMs / 1000, Number(lastUpdatedTs) + 0.000001);
+    return next.toFixed(6);
+  }
+
+  // Replace the text of an existing draft in place, keeping its destination. The
+  // draft comes from drafts.list because the update needs its id and destinations.
+  async updateDraft(draft: SlackDraft, text: string): Promise<any> {
+    if (this.config.auth_type === 'standard') {
+      throw new Error('Draft update requires browser authentication');
+    }
+    if (!draft.id || !draft.last_updated_ts || !draft.destinations?.length) {
+      throw new Error('Slack returned a draft without the id, last_updated_ts and destinations an update needs');
+    }
+
+    const params: Record<string, any> = {
+      draft_id: draft.id,
+      client_last_updated_ts: SlackClient.clientTimestampAfter(draft.last_updated_ts),
+      client_msg_id: draft.client_msg_id ?? crypto.randomUUID(),
+      blocks: JSON.stringify(parseMrkdwn(text)),
+      destinations: JSON.stringify(draft.destinations),
+      file_ids: '[]',
+      is_from_composer: 'false',
+    };
+
+    return this.request('drafts.update', params);
+  }
+
+  // Delete an unsent draft. Sends the same client timestamp an update does.
+  async deleteDraft(draft: SlackDraft): Promise<any> {
+    if (this.config.auth_type === 'standard') {
+      throw new Error('Draft deletion requires browser authentication');
+    }
+    if (!draft.id || !draft.last_updated_ts) {
+      throw new Error('Slack returned a draft without the id and last_updated_ts a delete needs');
+    }
+
+    return this.request('drafts.delete', {
+      draft_id: draft.id,
+      client_last_updated_ts: SlackClient.clientTimestampAfter(draft.last_updated_ts),
+    });
   }
 
   // List active drafts (browser auth only; Slack has no public API for drafts).

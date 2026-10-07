@@ -101,3 +101,32 @@ export async function fetchDrafts(
     .map(projectDraft)
     .slice(0, options.limit);
 }
+
+// The raw, still-unsent drafts, as Slack returns them. update and delete need
+// the fields projectDraft deliberately hides (last_updated_ts, destinations).
+export async function fetchActiveRawDrafts(
+  client: Pick<SlackClient, 'listDrafts'>,
+  options: { limit?: number } = {},
+): Promise<SlackDraft[]> {
+  const response = await client.listDrafts({ limit: options.limit ?? 100 });
+  return (response.drafts ?? []).filter((draft) => !draft.is_deleted && !draft.is_sent);
+}
+
+export function findDraftById(drafts: SlackDraft[], draftId: string): SlackDraft | undefined {
+  return drafts.find((draft) => draft.id === draftId);
+}
+
+// Slack holds one unsent draft per destination (a channel, or a thread inside
+// it), which is why creating a second one fails with attached_draft_exists.
+export function findDraftForDestination(
+  drafts: SlackDraft[],
+  channelId: string,
+  threadTs?: string,
+): SlackDraft | undefined {
+  const matches = drafts.filter((draft) => {
+    const destination = draft.destinations?.[0];
+    return destination?.channel_id === channelId && (destination.thread_ts ?? '') === (threadTs ?? '');
+  });
+  // Normally at most one; if Slack ever returns several, take the newest.
+  return matches.sort((a, b) => Number(b.last_updated_ts ?? 0) - Number(a.last_updated_ts ?? 0))[0];
+}

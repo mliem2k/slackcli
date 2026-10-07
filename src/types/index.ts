@@ -120,6 +120,10 @@ export interface SlackDraftDestination {
 
 export interface SlackDraft {
   id?: string;
+  // Slack's optimistic-concurrency token for a draft: drafts.update and
+  // drafts.delete both send it back as client_last_updated_ts.
+  last_updated_ts?: string;
+  client_msg_id?: string;
   date_created?: number;
   date_scheduled?: number;
   file_ids?: string[];

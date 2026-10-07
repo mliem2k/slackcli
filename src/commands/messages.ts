@@ -2,7 +2,13 @@ import { Command, Option } from 'commander';
 import ora from 'ora';
 import { readFile } from 'node:fs/promises';
 import { getAuthenticatedClient } from '../lib/auth.ts';
-import { fetchDrafts, parseDraftLimit } from '../lib/drafts.ts';
+import {
+  fetchActiveRawDrafts,
+  fetchDrafts,
+  findDraftById,
+  findDraftForDestination,
+  parseDraftLimit,
+} from '../lib/drafts.ts';
 import { error, formatDraftList, success, warning, writeJson } from '../lib/formatter.ts';
 import {
   resolveMessageTarget,
@@ -329,6 +335,7 @@ export function createMessagesCommand(): Command {
     )
     .option('--thread-ts <timestamp>', 'Create draft as reply to thread')
     .option('--permalink <url>', 'Slack message link; drafts a reply in that message\'s thread (replaces --recipient-id and --thread-ts)')
+    .option('--replace', 'Overwrite the unsent draft already in this channel or thread instead of failing with attached_draft_exists', false)
     .option('--workspace <id|name>', 'Workspace to use')
     .option('--json', 'Output the created draft as JSON', false)
     .action(async (options) => {
@@ -352,18 +359,33 @@ export function createMessagesCommand(): Command {
           channelId = dmResponse.channel.id;
         }
 
-        spinner.text = 'Creating draft...';
-        const response = await client.createDraft(channelId, message, {
-          thread_ts: target.threadTs,
-        });
+        let response;
+        let replaced = false;
+        const existing = options.replace
+          ? findDraftForDestination(await fetchActiveRawDrafts(client), channelId, target.threadTs)
+          : undefined;
+        if (existing) {
+          spinner.text = 'Replacing the existing draft...';
+          response = await client.updateDraft(existing, message);
+          // drafts.update answers with the updated draft; keep the id we sent
+          // if a future Slack response omits it.
+          response = { ...response, draft: { ...(response.draft ?? {}), id: response.draft?.id ?? existing.id } };
+          replaced = true;
+        } else {
+          spinner.text = 'Creating draft...';
+          response = await client.createDraft(channelId, message, {
+            thread_ts: target.threadTs,
+          });
+        }
 
-        spinner.succeed('Draft created successfully!');
+        spinner.succeed(replaced ? 'Draft replaced successfully!' : 'Draft created successfully!');
         if (options.json) {
           // A draft is unsent, so it has no message ts and no permalink. The
           // draft id is what a follow-up call has to work with.
           writeJson({
             channel_id: channelId,
             draft_id: response.draft.id,
+            ...(replaced ? { replaced: true } : {}),
             ...(target.threadTs ? { thread_ts: target.threadTs } : {}),
           });
         } else {
@@ -371,6 +393,74 @@ export function createMessagesCommand(): Command {
         }
       } catch (err: any) {
         spinner.fail('Failed to create draft');
+        error(err.message);
+        process.exit(1);
+      }
+    });
+
+  // Replace the text of one unsent draft by id
+  messages
+    .command('update-draft')
+    .description('Replace the text of an unsent draft by id. Note: Only works with Browser Session Tokens.')
+    .requiredOption('--draft-id <id>', 'Draft id, from list-drafts or the draft command')
+    .option('--message <text>', 'New message text')
+    .addOption(
+      new Option('--message-file <path>', 'Read the new message text from a UTF-8 file')
+        .conflicts('message')
+    )
+    .option('--workspace <id|name>', 'Workspace to use')
+    .option('--json', 'Output the updated draft as JSON', false)
+    .action(async (options) => {
+      const spinner = ora('Updating draft...').start();
+
+      try {
+        const message = await resolveMessageText(options);
+        const client = await getAuthenticatedClient(options.workspace);
+        const draft = findDraftById(await fetchActiveRawDrafts(client), options.draftId);
+        if (!draft) {
+          throw new Error(`No active draft ${options.draftId} found (it may have been sent or deleted)`);
+        }
+
+        await client.updateDraft(draft, message);
+        spinner.succeed('Draft updated successfully!');
+        if (options.json) {
+          writeJson({ draft_id: draft.id, channel_id: draft.destinations?.[0]?.channel_id });
+        } else {
+          success(`Draft ID: ${draft.id}`);
+        }
+      } catch (err: any) {
+        spinner.fail('Failed to update draft');
+        error(err.message);
+        process.exit(1);
+      }
+    });
+
+  // Delete one unsent draft by id
+  messages
+    .command('delete-draft')
+    .description('Delete an unsent draft by id. Note: Only works with Browser Session Tokens.')
+    .requiredOption('--draft-id <id>', 'Draft id, from list-drafts or the draft command')
+    .option('--workspace <id|name>', 'Workspace to use')
+    .option('--json', 'Output the deleted draft id as JSON', false)
+    .action(async (options) => {
+      const spinner = ora('Deleting draft...').start();
+
+      try {
+        const client = await getAuthenticatedClient(options.workspace);
+        const draft = findDraftById(await fetchActiveRawDrafts(client), options.draftId);
+        if (!draft) {
+          throw new Error(`No active draft ${options.draftId} found (it may have been sent or deleted)`);
+        }
+
+        await client.deleteDraft(draft);
+        spinner.succeed('Draft deleted successfully!');
+        if (options.json) {
+          writeJson({ draft_id: draft.id, deleted: true });
+        } else {
+          success(`Deleted draft: ${draft.id}`);
+        }
+      } catch (err: any) {
+        spinner.fail('Failed to delete draft');
         error(err.message);
         process.exit(1);
       }

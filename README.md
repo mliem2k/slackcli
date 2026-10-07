@@ -314,10 +314,13 @@ slackcli messages react --permalink="$LINK" --emoji=+1
 slackcli messages edit --channel-id=C123 --timestamp=1234567890.123456 --message="Corrected"
 slackcli messages draft --recipient-id=C123 --message="Draft for later"
 slackcli messages list-drafts --json
+slackcli messages draft --recipient-id=C123 --message-file=./v2.md --replace   # overwrite the draft already there
+slackcli messages update-draft --draft-id=Dr0123 --message="New text"
+slackcli messages delete-draft --draft-id=Dr0123
 ```
 
 > [!NOTE]
-> `messages draft` and `messages list-drafts` require browser session tokens. Slack exposes
+> `messages draft`, `list-drafts`, `update-draft` and `delete-draft` require browser session tokens. Slack exposes
 > no public API for drafts, so these commands use undocumented web-client endpoints that
 > may change without notice.
 
