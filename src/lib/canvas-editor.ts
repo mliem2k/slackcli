@@ -46,6 +46,15 @@ export interface CanvasEditCellOptions {
    *  wider stand-up-table rows did not shift any of those rows' occurrence numbers, the caller
    *  never needed to know it was there. */
   occurrence?: number;
+  /** Only consider rows of the table under the heading with exactly this text (for example
+   *  "Week #2"). Without it a row too narrow for columnOffset is skipped and the search silently
+   *  moves on to a later table that happens to share the anchor text; with it that row is
+   *  reported as out of range instead. */
+  underHeading?: string;
+  /** Skip a row too narrow for columnOffset and keep looking for the requested occurrence in a
+   *  later table. Off by default: a narrow row is reported as out of range, because skipping it
+   *  silently moves the edit to a different table that shares the anchor text. */
+  skipNarrowRows?: boolean;
   /** Cells to the right of the anchor cell within its row, 0 edits the anchor cell itself. */
   columnOffset: number;
   /** Replacement text. Empty string clears the cell. */
@@ -113,7 +122,8 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 export function buildCellLocatorExpression(
   rowAnchorText: string,
   columnOffset: number,
-  excludeRowIds: string[] = []
+  excludeRowIds: string[] = [],
+  underHeading: string = ''
 ): string {
   return `(() => {
     // Two different DOM shapes hold one cell's lines depending on whether it is being actively
@@ -139,9 +149,25 @@ export function buildCellLocatorExpression(
     const columnOffset = ${JSON.stringify(columnOffset)};
     const excludeRowIds = new Set(${JSON.stringify(excludeRowIds)});
     const cells = Array.from(document.querySelectorAll('td.table-cell'));
+    // The heading a row sits under is the nearest heading section before it in document order.
+    const underHeading = ${JSON.stringify(underHeading)};
+    const headingByRowId = new Map();
+    if (underHeading) {
+      let currentHeading = '';
+      for (const el of Array.from(document.querySelectorAll('td.table-cell, .section[role="heading"]'))) {
+        if (el.getAttribute('role') === 'heading') {
+          // A heading styled paragraph inside a table cell is cell content, not a document heading.
+          if (!(el.closest && el.closest('td.table-cell'))) currentHeading = el.textContent.trim();
+        } else {
+          const id = el.getAttribute('data-row-id');
+          if (!headingByRowId.has(id)) headingByRowId.set(id, currentHeading);
+        }
+      }
+    }
     const anchorCell = cells.find((td) => {
       const content = td.querySelector('.table-cell-content');
       if (!content || cellText(content) !== rowAnchorText) return false;
+      if (underHeading && headingByRowId.get(td.getAttribute('data-row-id')) !== underHeading) return false;
       return !excludeRowIds.has(td.getAttribute('data-row-id'));
     });
     if (!anchorCell) return { found: false, reason: 'row_not_found' };
@@ -291,10 +317,11 @@ async function locateCell(
   session: CdpSession,
   rowAnchorText: string,
   columnOffset: number,
-  excludeRowIds: string[] = []
+  excludeRowIds: string[] = [],
+  underHeading: string = ''
 ): Promise<CellLocatorResult> {
   const result = await session.send<{ result?: { value?: CellLocatorResult } }>('Runtime.evaluate', {
-    expression: buildCellLocatorExpression(rowAnchorText, columnOffset, excludeRowIds),
+    expression: buildCellLocatorExpression(rowAnchorText, columnOffset, excludeRowIds, underHeading),
     returnByValue: true,
   });
   return result?.result?.value ?? { found: false, reason: 'row_not_found' };
@@ -429,7 +456,9 @@ async function locateCellByScrolling(
   columnOffset: number,
   timeoutMs: number,
   sleep: (ms: number) => Promise<void>,
-  occurrence: number = 1
+  occurrence: number = 1,
+  underHeading: string = '',
+  skipNarrowRows: boolean = false
 ): Promise<CellLocatorResult> {
   const deadline = Date.now() + timeoutMs;
   const excludeRowIds: string[] = [];
@@ -465,7 +494,7 @@ async function locateCellByScrolling(
       return { ...(lastExcludedNarrowRowDiagnosis ?? last), timedOut: !stabilized };
     }
 
-    last = await locateCell(session, rowAnchorText, columnOffset, excludeRowIds);
+    last = await locateCell(session, rowAnchorText, columnOffset, excludeRowIds, underHeading);
     if (last.found) {
       matchesSeen += 1;
       if (matchesSeen >= occurrence) return last;
@@ -483,6 +512,7 @@ async function locateCellByScrolling(
         // found-but-wrong-occurrence match, and keep walking toward the requested occurrence,
         // rather than treating one narrow row anywhere in the document as a dead end for every
         // occurrence after it.
+        if (!skipNarrowRows) return last;
         lastExcludedNarrowRowDiagnosis = last;
         excludeRowIds.push(last.rowId);
         previousOutOfRangeRowId = null;
@@ -619,7 +649,9 @@ export async function editCanvasCell(
     options.columnOffset,
     loadTimeoutMs,
     sleep,
-    occurrence
+    occurrence,
+    options.underHeading ?? '',
+    options.skipNarrowRows === true
   );
   if (!cell.found) {
     // "Scrolled to the bottom" is only true once the search actually confirmed nothing more could

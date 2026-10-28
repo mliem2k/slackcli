@@ -413,8 +413,16 @@ export function createCanvasCommand(): Command {
     .requiredOption('--row-anchor <text>', 'Exact text of an existing cell that identifies the target row')
     .option(
       '--occurrence <n>',
-      'Which match to use when --row-anchor text is not unique in the canvas, 1-indexed in top-to-bottom document order among rows where --column-offset actually resolves to a real cell (default: 1, the first such match). A row whose anchor text matches but is too narrow for --column-offset is skipped and does not count, so it never has to be accounted for when picking this number. Run "canvas sections --contains-text" first to check how many matches exist before assuming 1 is correct.',
+      'Which match to use when --row-anchor text is not unique in the canvas, 1-indexed in top-to-bottom document order among rows where --column-offset actually resolves to a real cell (default: 1, the first such match). A row whose anchor text matches but is too narrow for --column-offset fails with an out of range error unless --skip-narrow-rows is set, which skips it without counting it. Run "canvas sections --contains-text" first to check how many matches exist before assuming 1 is correct.',
       '1'
+    )
+    .option(
+      '--under-heading <text>',
+      'Only consider rows of the table under the heading with exactly this text (for example "Week #2"). A row under that heading that is too narrow for --column-offset then fails with an out of range error instead of the search moving on to another table.'
+    )
+    .option(
+      '--skip-narrow-rows',
+      'Skip a row that is too narrow for --column-offset and keep looking in later tables. Off by default: a narrow row fails with an out of range error, since skipping it silently edits another table that shares the anchor text.'
     )
     .requiredOption('--column-offset <n>', 'Cells to the right of the anchor cell to edit (0 edits the anchor cell itself)')
     .requiredOption('--text <text>', 'Replacement text for the target cell (pass "" to clear it)')
@@ -459,7 +467,7 @@ export function createCanvasCommand(): Command {
         const canvasUrl = `https://app.slack.com/client/${workspace.workspace_id}/unified-files/doc/${canvasId}`;
 
         const result = await editCanvasCellAuto(
-          { canvasUrl, rowAnchorText: options.rowAnchor, occurrence, columnOffset, text: options.text },
+          { canvasUrl, rowAnchorText: options.rowAnchor, occurrence, columnOffset, text: options.text, underHeading: options.underHeading, skipNarrowRows: options.skipNarrowRows === true },
           { headless: options.headless === true }
         );
 
