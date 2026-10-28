@@ -28,6 +28,57 @@ function locate(rowAnchorText: string, columnOffset: number, tds: unknown[]): an
   return fn(fakeDocument);
 }
 
+function makeFakeHeading(text: string) {
+  return { getAttribute: (name: string) => (name === 'role' ? 'heading' : null), textContent: text };
+}
+
+function locateUnder(rowAnchorText: string, columnOffset: number, underHeading: string, nodes: unknown[]): any {
+  const tds = nodes.filter((node: any) => node.getAttribute('role') !== 'heading');
+  const fakeDocument = {
+    querySelectorAll: (sel: string) =>
+      sel === 'td.table-cell' ? tds : sel === 'td.table-cell, .section[role="heading"]' ? nodes : [],
+  };
+  const expression = buildCellLocatorExpression(rowAnchorText, columnOffset, [], underHeading);
+  return new Function('document', `return ${expression};`)(fakeDocument);
+}
+
+describe('buildCellLocatorExpression under a heading', () => {
+  const weekOne = [makeFakeHeading('Week #1'), ...[0, 1, 2, 3, 4, 5].map((i) => makeFakeTd('row_w1', i === 0 ? 'Michael' : `w1c${i}`))];
+  const weekTwo = [makeFakeHeading('Week #2'), makeFakeTd('row_w2', 'Michael'), makeFakeTd('row_w2', 'w2c1')];
+  const nodes = [...weekOne, ...weekTwo];
+
+  it('finds the row under the named heading, not the first row with the same text', () => {
+    const result = locateUnder('Michael', 1, 'Week #2', nodes);
+    expect(result.found).toBe(true);
+    expect(result.currentText).toBe('w2c1');
+    expect(result.rowId).toBe('row_w2');
+  });
+
+  it('reports out of range for a narrow row under the heading instead of moving to another table', () => {
+    const result = locateUnder('Michael', 4, 'Week #2', nodes);
+    expect(result).toEqual({ found: false, reason: 'column_out_of_range', rowId: 'row_w2', rowCellCount: 2 });
+  });
+
+  it('reports row_not_found when no table sits under that heading', () => {
+    expect(locateUnder('Michael', 1, 'Week #9', nodes)).toEqual({ found: false, reason: 'row_not_found' });
+  });
+
+  it('ignores a heading styled paragraph inside a table cell', () => {
+    const cellHeading = {
+      getAttribute: (name: string) => (name === 'role' ? 'heading' : null),
+      textContent: 'Today\'s Plan',
+      closest: (sel: string) => (sel === 'td.table-cell' ? {} : null),
+    };
+    const result = locateUnder('Michael', 1, 'Week #2', [...weekOne, cellHeading, ...weekTwo.slice(0, 0), makeFakeHeading('Week #2'), cellHeading, makeFakeTd('row_w2', 'Michael'), makeFakeTd('row_w2', 'w2c1')]);
+    expect(result.rowId).toBe('row_w2');
+    expect(result.currentText).toBe('w2c1');
+  });
+
+  it('keeps today\'s behaviour without a heading', () => {
+    expect(locateUnder('Michael', 4, '', nodes).rowId).toBe('row_w1');
+  });
+});
+
 describe('buildCellLocatorExpression', () => {
   const row1 = [makeFakeTd('row_1', 'Michael'), makeFakeTd('row_1', 'Working'), makeFakeTd('row_1', '')];
   const row2 = [makeFakeTd('row_2', 'Kevin'), makeFakeTd('row_2', ''), makeFakeTd('row_2', '')];
@@ -654,6 +705,30 @@ describe('editCanvasCell', () => {
     ).toHaveLength(2);
   });
 
+  it('fails on a confirmed too-narrow row by default instead of editing a later table', async () => {
+    const { session, calls } = makeFakeSession({
+      locatorResults: [
+        { found: false, reason: 'column_out_of_range', rowId: 'row-narrow', rowCellCount: 5 },
+        { found: false, reason: 'column_out_of_range', rowId: 'row-narrow', rowCellCount: 5 },
+        { found: true, x: 10, y: 20, currentText: '' },
+      ],
+    });
+
+    const result = await editCanvasCell(session, {
+      canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
+      rowAnchorText: 'Michael',
+      columnOffset: 4,
+      text: 'Done',
+      sleep: instantSleep,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('column_out_of_range');
+    }
+    expect(calls.some((c) => c.method === 'Input.insertText')).toBe(false);
+  });
+
   it('rules out a narrower row past occurrence one instead of dead-ending the whole search', async () => {
     // Reproduces a real live bug: a two-column summary table's own name cell can be occurrence 1
     // for an anchor text also used, further down the canvas, by a much wider table's name column
@@ -678,6 +753,7 @@ describe('editCanvasCell', () => {
       canvasUrl: 'https://app.slack.com/client/T1/unified-files/doc/F1',
       rowAnchorText: 'Michael',
       columnOffset: 2,
+      skipNarrowRows: true,
       text: 'Done',
       sleep: instantSleep,
     });
@@ -762,6 +838,7 @@ describe('editCanvasCell', () => {
       rowAnchorText: 'Michael',
       occurrence: 2,
       columnOffset: 2,
+      skipNarrowRows: true,
       text: 'Done',
       sleep: instantSleep,
     });
