@@ -658,6 +658,56 @@ export class SlackClient {
     return this.uploadFilesExternal(channel, [filePath], options);
   }
 
+  // Steps 1 and 2 of Slack's external upload for one already validated file:
+  // ask for an upload URL, then send the bytes to it. The file stays unshared
+  // until completeUploadExternal lists it.
+  private async stageExternalUpload(
+    { filePath, filename, size }: { filePath: string; filename: string; size: number },
+  ): Promise<{ id: string; title: string }> {
+    let uploadUrlResponse: ExternalUploadUrlResponse;
+    try {
+      uploadUrlResponse = await this.request('files.getUploadURLExternal', {
+        filename,
+        length: size,
+      }) as ExternalUploadUrlResponse;
+    } catch (error) {
+      // e.g. file_upload_size_restricted — name the file while keeping the
+      // error's type and slackData so --json still reports the same code.
+      throwNamingFile(error, filename, 'Upload URL request failed');
+    }
+
+    if (!uploadUrlResponse.upload_url || !uploadUrlResponse.file_id) {
+      throw new Error(`Slack API error: missing upload URL or file ID for ${filename}`);
+    }
+
+    const fileBytes = await readFile(filePath);
+    const uploadStartedAt = performance.now();
+    let uploadResponse: Response;
+    try {
+      uploadResponse = await fetch(uploadUrlResponse.upload_url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+        },
+        body: fileBytes,
+      });
+    } catch (error) {
+      // A thrown fetch (network error) names the file too, not just a non-2xx.
+      throwNamingFile(error, filename, 'File upload failed');
+    }
+    logger.info('File upload returned HTTP {http_status}', {
+      http_status: uploadResponse.status,
+      bytes: size,
+      duration_ms: Math.round(performance.now() - uploadStartedAt),
+    });
+
+    if (!uploadResponse.ok) {
+      throw new Error(`File upload failed for ${filename}: HTTP ${uploadResponse.status}`);
+    }
+
+    return { id: uploadUrlResponse.file_id, title: filename };
+  }
+
   // Upload one or more local files and share them in a SINGLE message, the way
   // the Slack UI attaches several files to one post. files.completeUploadExternal
   // takes a `files` array and a single `initial_comment`, so each path gets its
@@ -685,49 +735,8 @@ export class SlackClient {
     );
 
     const uploaded: Array<{ id: string; title: string }> = [];
-    for (const { filePath, filename, size } of files) {
-      let uploadUrlResponse: ExternalUploadUrlResponse;
-      try {
-        uploadUrlResponse = await this.request('files.getUploadURLExternal', {
-          filename,
-          length: size,
-        }) as ExternalUploadUrlResponse;
-      } catch (error) {
-        // e.g. file_upload_size_restricted — name the file while keeping the
-        // error's type and slackData so --json still reports the same code.
-        throwNamingFile(error, filename, 'Upload URL request failed');
-      }
-
-      if (!uploadUrlResponse.upload_url || !uploadUrlResponse.file_id) {
-        throw new Error(`Slack API error: missing upload URL or file ID for ${filename}`);
-      }
-
-      const fileBytes = await readFile(filePath);
-      const uploadStartedAt = performance.now();
-      let uploadResponse: Response;
-      try {
-        uploadResponse = await fetch(uploadUrlResponse.upload_url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/octet-stream',
-          },
-          body: fileBytes,
-        });
-      } catch (error) {
-        // A thrown fetch (network error) names the file too, not just a non-2xx.
-        throwNamingFile(error, filename, 'File upload failed');
-      }
-      logger.info('File upload returned HTTP {http_status}', {
-        http_status: uploadResponse.status,
-        bytes: size,
-        duration_ms: Math.round(performance.now() - uploadStartedAt),
-      });
-
-      if (!uploadResponse.ok) {
-        throw new Error(`File upload failed for ${filename}: HTTP ${uploadResponse.status}`);
-      }
-
-      uploaded.push({ id: uploadUrlResponse.file_id, title: filename });
+    for (const file of files) {
+      uploaded.push(await this.stageExternalUpload(file));
     }
 
     const params: Record<string, string> = {
@@ -740,9 +749,23 @@ export class SlackClient {
     return this.request('files.completeUploadExternal', params);
   }
 
+  // Upload a file for a draft to carry. Completing the upload without a
+  // channel_id leaves the file private to the uploader, which is what the
+  // Slack composer does for an attachment: nothing is shared until the draft
+  // is sent. Returns the file id to pass to createDraft or updateDraft.
+  async uploadFileForDraft(filePath: string): Promise<string> {
+    this.requireBrowserAuth(DRAFT_CREATE_AUTH_MESSAGE);
+    const staged = await this.stageExternalUpload({ filePath, ...(await checkUploadFile(filePath)) });
+    await this.request('files.completeUploadExternal', {
+      files: JSON.stringify([staged]),
+    });
+    return staged.id;
+  }
+
   // Create draft message
   async createDraft(channelId: string, text: string, options: {
     thread_ts?: string;
+    file_ids?: string[];
   } = {}): Promise<any> {
     this.requireBrowserAuth(DRAFT_CREATE_AUTH_MESSAGE);
 
@@ -756,7 +779,7 @@ export class SlackClient {
       client_msg_id: crypto.randomUUID(),
       blocks: JSON.stringify(parseMrkdwn(text)),
       destinations: JSON.stringify(destinations),
-      file_ids: '[]',
+      file_ids: JSON.stringify(options.file_ids ?? []),
       is_from_composer: 'false',
     };
 
@@ -775,7 +798,11 @@ export class SlackClient {
 
   // Replace the text of an existing draft in place, keeping its destination. The
   // draft comes from drafts.list because the update needs its id and destinations.
-  async updateDraft(draft: SlackDraft, text: string): Promise<any> {
+  // The attached files are kept unless options.file_ids names a new list, so a
+  // text-only update cannot silently drop the draft's attachments.
+  async updateDraft(draft: SlackDraft, text: string, options: {
+    file_ids?: string[];
+  } = {}): Promise<any> {
     if (this.config.auth_type === 'standard') {
       throw new Error('Draft update requires browser authentication');
     }
@@ -789,7 +816,7 @@ export class SlackClient {
       client_msg_id: draft.client_msg_id ?? crypto.randomUUID(),
       blocks: JSON.stringify(parseMrkdwn(text)),
       destinations: JSON.stringify(draft.destinations),
-      file_ids: '[]',
+      file_ids: JSON.stringify(options.file_ids ?? draft.file_ids ?? []),
       is_from_composer: 'false',
     };
 

@@ -371,6 +371,27 @@ slackcli messages draft --recipient-id=C1234567890 --message="Hello team!"
 Creates an unsent draft in the Slack client — useful when you want a human to
 review and press send.
 
+### Attaching files to a draft
+
+```bash
+slackcli messages draft --recipient-id=C1234567890 --message="Before and after" \
+  --file=./before.png --file=./after.png
+```
+
+`--file` attaches a local file and can be repeated, up to 10 files (Slack's limit for one
+message). Each file is uploaded first, in the order given, and its id is put on the draft.
+The upload is private: it is completed without a channel, so nothing is shared until a human
+sends the draft from Slack, and the draft shows the files in the composer like a file added by
+hand. `--json` adds `file_ids` to the output. The paths are checked before any upload (missing,
+empty and non-regular files, a repeated path, more than 10 files), so a bad path uploads
+nothing. `--dry-run` runs the same checks and reports each file's name and size without
+uploading. If creating the draft fails after the uploads, the files remain as private, unshared
+files in your Slack.
+
+`update-draft --file` and `draft --replace --file` replace the files of the existing draft with
+the ones listed. Without `--file` the existing draft keeps the files it already has.
+`send-draft` still refuses a draft that carries files, so send those from Slack.
+
 To send a reviewed draft or discard it:
 
 ```bash
@@ -624,14 +645,17 @@ slackcli messages draft --recipient-id=C1234567890 --message-file=./v2.md --repl
 
 # Replace the text of a draft by id (ids come from list-drafts or the draft command)
 slackcli messages update-draft --draft-id=Dr0123456789 --message="New text"
+
+# Replace the text and the attached files
+slackcli messages update-draft --draft-id=Dr0123456789 --message="New text" --file=./after.png
 ```
 
 `--replace` matches the destination exactly: a channel draft is only replaced by a channel
 draft, and a thread draft only by a draft for the same `--thread-ts`. `update-draft` looks
 the draft up first and fails with a clear error when no active draft has that id (it may
 have been sent or deleted). Both take `--dry-run`. `--json` prints `{draft_id, channel_id}`
-for an update and adds `"replaced": true` to the `draft` output when an existing draft was
-overwritten.
+(plus `file_ids` with `--file`) for an update and adds `"replaced": true` to the `draft`
+output when an existing draft was overwritten.
 
 **Browser auth only**, like the other draft commands, and these use undocumented web-client
 endpoints (`drafts.update`). One detail worth knowing if they ever break:
