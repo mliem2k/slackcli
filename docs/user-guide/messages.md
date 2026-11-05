@@ -100,6 +100,23 @@ slackcli messages send --users="@alice bob@example.com U3333333333" --message="H
   to the same group DM, so repeated sends land in one thread rather than
   creating new ones.
 
+### Mentions (`@handle`)
+
+Plain `@name` in the text becomes a real Slack mention when exactly one active
+person matches: an exact handle (`@alice`, case-insensitive), a unique first
+name (`@Alice`), or a raw user ID (`@U0123456789`). It costs one `users.list`
+scan per message; a message with no `@name` makes no lookup. Emails, existing
+`<…>` tokens and code spans are left as typed, and `@here`, `@channel` and
+`@everyone` are never turned into broadcasts. A name that matches nobody, or
+more than one person, stays plain text and is named in a warning on stderr, so
+the CLI never guesses who to ping. Use the handle shown by
+`slackcli search people <query>`, or write a `<@U…>` token yourself, when a
+name is ambiguous.
+
+This works on `send`, `edit`, `draft`, `update-draft` and `schedule`. With
+`--blocks` the blocks are passed through unchanged; only the text fallback is
+resolved.
+
 ### Message text from a file (`--message-file`)
 
 `--message-file` reads the message body from a UTF-8 file instead of an
@@ -147,7 +164,8 @@ MSG
   `-`, write `./-`.
 - `--message` cannot be combined with `--message-file -`, as with a path.
 
-The same works on `messages edit` and `messages draft`.
+The same works on `messages edit`, `messages draft`, `messages update-draft`
+and `messages schedule`.
 
 ### JSON output (`--json`)
 
@@ -369,7 +387,8 @@ slackcli messages draft --recipient-id=C1234567890 --message="Hello team!"
 ```
 
 Creates an unsent draft in the Slack client — useful when you want a human to
-review and press send.
+review and press send, or add `--at`/`--in` to schedule the send. Plain
+`@handle` text becomes a real mention (see [Mentions](#mentions-handle)).
 
 ### Attaching files to a draft
 
@@ -391,6 +410,35 @@ files in your Slack.
 `update-draft --file` and `draft --replace --file` replace the files of the existing draft with
 the ones listed. Without `--file` the existing draft keeps the files it already has.
 `send-draft` still refuses a draft that carries files, so send those from Slack.
+
+### Scheduling a draft (`--at`, `--in`)
+
+Add `--at` or `--in` to have Slack send the draft at a future time, the same
+moment rules as [`messages schedule`](#when-to-post---at---in):
+
+```bash
+# Tomorrow at 09:00 in this machine's timezone
+slackcli messages draft --recipient-id=C1234567890 \
+  --message="Heads-up @alice, the deploy starts at 09:00" \
+  --at "2026-11-06 09:00"
+
+# In two hours, with the result as JSON
+slackcli messages draft --recipient-id=C1234567890 --message="Standup" --in=2h --json
+```
+
+`--at` takes Unix seconds, ISO 8601 with an offset or `Z`, or a local date and
+time; `--in` takes minutes, hours and days (`45m`, `2h`, `3d`, `1h30m`). The
+time must be in the future and at most 120 days ahead. A scheduled draft is
+sent by Slack itself, so nothing has to stay running. Files can ride on a
+scheduled draft.
+
+`--replace` changes the text and files of an existing draft and keeps its send
+time unless `--at` or `--in` gives a new one. `send-draft` refuses a scheduled
+draft, because Slack sends it without the CLI.
+
+The draft is created first and its send time is set with a second Slack call,
+as the Slack web client does; if setting the time fails, the new draft is
+deleted so a failed schedule leaves no stray draft behind.
 
 To send a reviewed draft or discard it:
 
@@ -434,12 +482,15 @@ it does on `messages send`, including `-` for standard input.
 
 `--json` prints the draft's identity. A draft is unsent, so it has no message
 timestamp and no permalink — the draft id is what a follow-up has to work with.
-`thread_ts` is present only when the draft is a threaded reply.
+`thread_ts` is present only when the draft is a threaded reply, `file_ids` only
+with `--file`, and `date_scheduled` (Unix seconds) only when the draft has a
+send time:
 
 ```json
 {
   "channel_id": "C1234567890",
-  "draft_id": "1234567890.123456"
+  "draft_id": "1234567890.123456",
+  "date_scheduled": 1793950800
 }
 ```
 
@@ -648,14 +699,19 @@ slackcli messages update-draft --draft-id=Dr0123456789 --message="New text"
 
 # Replace the text and the attached files
 slackcli messages update-draft --draft-id=Dr0123456789 --message="New text" --file=./after.png
+
+# Move the existing draft's send time
+slackcli messages draft --recipient-id=C1234567890 --message-file=./v2.md --replace --at="2026-11-06 09:00"
 ```
 
 `--replace` matches the destination exactly: a channel draft is only replaced by a channel
-draft, and a thread draft only by a draft for the same `--thread-ts`. `update-draft` looks
-the draft up first and fails with a clear error when no active draft has that id (it may
-have been sent or deleted). Both take `--dry-run`. `--json` prints `{draft_id, channel_id}`
-(plus `file_ids` with `--file`) for an update and adds `"replaced": true` to the `draft`
-output when an existing draft was overwritten.
+draft, and a thread draft only by a draft for the same `--thread-ts`. It keeps the existing
+draft's send time unless `--at` or `--in` gives a new one. `update-draft` looks the draft up
+first and fails with a clear error when no active draft has that id (it may have been sent
+or deleted), and it keeps a scheduled draft's send time. Both take `--dry-run`. `--json`
+prints `{draft_id, channel_id}` (plus `file_ids` with `--file`, and `date_scheduled` when
+the draft has a send time) for an update and adds `"replaced": true` to the `draft` output
+when an existing draft was overwritten.
 
 **Browser auth only**, like the other draft commands, and these use undocumented web-client
 endpoints (`drafts.update`). One detail worth knowing if they ever break:

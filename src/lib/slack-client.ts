@@ -379,6 +379,37 @@ function summarizeScheduledPage(
   return { summaries, skipped };
 }
 
+// The destination of a draft: its channel, and the thread when it is a reply.
+function draftDestinations(channelId: string, threadTs: string | undefined): Array<Record<string, unknown>> {
+  return threadTs
+    ? [{ channel_id: channelId, thread_ts: threadTs, broadcast: false }]
+    : [{ channel_id: channelId }];
+}
+
+// The params drafts.update takes, shared by a text update and by setting a
+// draft's send time. `is_from_composer` is true when a send time is involved,
+// as in the Slack web client.
+function draftUpdateParams(input: {
+  draftId: string;
+  clientMsgId: string;
+  clientLastUpdatedTs: string;
+  blocks: unknown;
+  destinations: unknown;
+  fileIds: string[];
+  dateScheduled?: number;
+}): Record<string, any> {
+  return {
+    draft_id: input.draftId,
+    client_last_updated_ts: input.clientLastUpdatedTs,
+    client_msg_id: input.clientMsgId,
+    blocks: JSON.stringify(input.blocks),
+    destinations: JSON.stringify(input.destinations),
+    file_ids: JSON.stringify(input.fileIds),
+    ...(input.dateScheduled === undefined ? {} : { date_scheduled: input.dateScheduled }),
+    is_from_composer: input.dateScheduled === undefined ? 'false' : 'true',
+  };
+}
+
 export class SlackClient {
   private readonly config: WorkspaceConfig;
   private readonly webClient?: WebClient;
@@ -762,28 +793,59 @@ export class SlackClient {
     return staged.id;
   }
 
-  // Create draft message
+  // Create draft message. A `date_scheduled` makes Slack send the draft at that
+  // Unix time: drafts.create refuses a time itself, so the draft is created
+  // first and drafts.update sets it, as the Slack web client does. If that
+  // update fails the new draft is deleted, so a failed schedule leaves no
+  // stray draft behind.
   async createDraft(channelId: string, text: string, options: {
     thread_ts?: string;
     file_ids?: string[];
+    date_scheduled?: number;
   } = {}): Promise<any> {
     this.requireBrowserAuth(DRAFT_CREATE_AUTH_MESSAGE);
 
-    const destinations: any = [{ channel_id: channelId }];
-    if (options.thread_ts) {
-      destinations[0].thread_ts = options.thread_ts;
-      destinations[0].broadcast = false;
-    }
+    const blocks = parseMrkdwn(text);
+    const destinations = draftDestinations(channelId, options.thread_ts);
+    const fileIds = options.file_ids ?? [];
 
-    const params: Record<string, any> = {
+    const created = await this.request('drafts.create', {
       client_msg_id: crypto.randomUUID(),
-      blocks: JSON.stringify(parseMrkdwn(text)),
+      blocks: JSON.stringify(blocks),
       destinations: JSON.stringify(destinations),
-      file_ids: JSON.stringify(options.file_ids ?? []),
+      file_ids: JSON.stringify(fileIds),
       is_from_composer: 'false',
-    };
+    });
+    if (options.date_scheduled === undefined) return created;
 
-    return this.request('drafts.create', params);
+    const draftId: string | undefined = created?.draft?.id;
+    if (!draftId) {
+      throw new Error('Slack created a draft without an id, so nothing was scheduled');
+    }
+    try {
+      const updated = await this.request('drafts.update', draftUpdateParams({
+        draftId,
+        clientMsgId: created.draft.client_msg_id ?? crypto.randomUUID(),
+        clientLastUpdatedTs: (Date.now() / 1000).toFixed(7),
+        blocks,
+        destinations,
+        fileIds,
+        dateScheduled: options.date_scheduled,
+      }));
+      // drafts.update answers with the updated draft; keep the id we sent if a
+      // future Slack response omits it.
+      return { ...updated, draft: { ...(updated.draft ?? created.draft), id: updated.draft?.id ?? draftId } };
+    } catch (error) {
+      try {
+        await this.deleteDraft(draftId);
+      } catch (cleanupError) {
+        logger.warn('Could not delete draft {draft_id} after its schedule failed: {reason}', {
+          draft_id: draftId,
+          reason: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      }
+      throw error;
+    }
   }
 
   // The value Slack wants as client_last_updated_ts is the CLIENT's clock for this
@@ -799,9 +861,11 @@ export class SlackClient {
   // Replace the text of an existing draft in place, keeping its destination. The
   // draft comes from drafts.list because the update needs its id and destinations.
   // The attached files are kept unless options.file_ids names a new list, so a
-  // text-only update cannot silently drop the draft's attachments.
+  // text-only update cannot silently drop the draft's attachments. A draft that
+  // already has a send time keeps it unless options.date_scheduled replaces it.
   async updateDraft(draft: SlackDraft, text: string, options: {
     file_ids?: string[];
+    date_scheduled?: number;
   } = {}): Promise<any> {
     if (this.config.auth_type === 'standard') {
       throw new Error('Draft update requires browser authentication');
@@ -810,17 +874,18 @@ export class SlackClient {
       throw new Error('Slack returned a draft without the id, last_updated_ts and destinations an update needs');
     }
 
-    const params: Record<string, any> = {
-      draft_id: draft.id,
-      client_last_updated_ts: SlackClient.clientTimestampAfter(draft.last_updated_ts),
-      client_msg_id: draft.client_msg_id ?? crypto.randomUUID(),
-      blocks: JSON.stringify(parseMrkdwn(text)),
-      destinations: JSON.stringify(draft.destinations),
-      file_ids: JSON.stringify(options.file_ids ?? draft.file_ids ?? []),
-      is_from_composer: 'false',
-    };
-
-    return this.request('drafts.update', params);
+    const existingSchedule = draft.date_scheduled && draft.date_scheduled > Date.now() / 1000
+      ? draft.date_scheduled
+      : undefined;
+    return this.request('drafts.update', draftUpdateParams({
+      draftId: draft.id,
+      clientLastUpdatedTs: SlackClient.clientTimestampAfter(draft.last_updated_ts),
+      clientMsgId: draft.client_msg_id ?? crypto.randomUUID(),
+      blocks: parseMrkdwn(text),
+      destinations: draft.destinations,
+      fileIds: options.file_ids ?? draft.file_ids ?? [],
+      dateScheduled: options.date_scheduled ?? existingSchedule,
+    }));
   }
 
   // List active drafts (browser auth only; Slack has no public API for drafts).

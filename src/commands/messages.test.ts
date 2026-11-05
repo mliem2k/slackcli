@@ -164,6 +164,10 @@ describe('messages command', () => {
     expect(longOptions('draft')).toContain('--replace');
   });
 
+  it('lets draft be scheduled with --at or --in', () => {
+    expect(longOptions('draft')).toEqual(expect.arrayContaining(['--at', '--in']));
+  });
+
   it('lets draft and update-draft attach files, repeating --file for several', () => {
     for (const name of ['draft', 'update-draft']) {
       expect(longOptions(name)).toContain('--file');
