@@ -40,9 +40,14 @@ import { CHANNEL_NAME_NOTE, describeCommand, USER_NAME_NOTE, type CommandHelp } 
 import { confirmWrite } from './usergroups.ts';
 import { failCommand } from '../lib/command-errors.ts';
 import { InvalidInputError, NotFoundError } from '../lib/cli-errors.ts';
-import { resolveIdentifier, resolveUserList, lazyClient, splitUserRefs } from '../lib/name-resolver.ts';
+import {
+  lazyClient,
+  resolveIdentifier,
+  resolveTextMentions,
+  resolveUserList,
+  splitUserRefs,
+} from '../lib/name-resolver.ts';
 import { resolveMessageText } from '../lib/message-input.ts';
-import { resolveTextMentions } from '../lib/name-resolver.ts';
 import { parseScheduleTime } from '../lib/schedule-time.ts';
 import { deleteMessage, removeReaction } from '../lib/message.ts';
 import { resolvePostThread } from '../lib/thread-parent.ts';
@@ -62,6 +67,14 @@ const MESSAGE_TEXT_NOTE =
 const STDIN_NOTE =
   '--message-file - reads the text from piped standard input (no shell quoting, no temp file); ' +
   'one trailing newline is dropped. A terminal on stdin, more than 1 MB, or a pipe still open after 5 minutes is refused.';
+const TEXT_MENTION_NOTE =
+  'A plain @handle in the text (exact, case-insensitive), a unique @FirstName or a raw @U… becomes a ' +
+  'real mention. Emails, existing <…> tokens and code spans are left as typed, and @here, @channel and ' +
+  '@everyone are never turned into broadcasts. An unknown or ambiguous name stays plain text, with a warning.';
+const SCHEDULE_TIME_NOTE =
+  '--at takes Unix seconds, ISO 8601 with an offset or Z (2026-11-06T09:00:00+01:00), or a local date and ' +
+  'time ("2026-11-06 09:00", read in this machine\'s timezone). --in takes minutes, hours and days: 45m, ' +
+  '2h, 3d, 1h30m. The time must be in the future and at most 120 days ahead.';
 const RECIPIENT_NOTE =
   '--recipient-id takes a channel ID (C...), a user ID (U..., opens a DM), a Slack URL, ' +
   'a channel name (#general) or a user (@alice, alice@example.com). A bare name must match ' +
@@ -114,6 +127,7 @@ const HELP = {
       'One of --message or --message-file is required; they are mutually exclusive. ' +
         'With --file the text becomes the file comment.',
       STDIN_NOTE,
+      TEXT_MENTION_NOTE,
       '--file is repeatable: pass it once per attachment (--file a.png --file b.png) to share ' +
         'several files in ONE message. It is all-or-nothing — if any file fails, the error names ' +
         'which one and at which step, and no message is posted.',
@@ -185,6 +199,7 @@ const HELP = {
       PERMALINK_MESSAGE_NOTE,
       MESSAGE_TEXT_NOTE,
       STDIN_NOTE,
+      TEXT_MENTION_NOTE,
       'Edits immediately, with no confirmation prompt.',
     ],
     dryRun: true,
@@ -233,15 +248,18 @@ const HELP = {
     summary: 'Create an unsent draft for a human to review',
     description:
       'Create an unsent draft in a channel, DM or thread; it appears in the Slack composer for a human ' +
-      'to review and send. Use "messages send" to post directly, or "messages send-draft" to post it later.',
+      'to review and send. Add --at or --in to have Slack send the draft at a future time instead. ' +
+      'Use "messages send" to post directly, or "messages send-draft" to post it later.',
     examples: [
       'slackcli messages draft --recipient-id C0123456789 --message "Release notes for review"',
       'slackcli messages draft --permalink https://acme.slack.com/archives/C0123456789/p1712345678123456 --message-file ./reply.md --json',
       'slackcli messages draft --recipient-id C0123456789 --message "Before and after" --file ./before.png --file ./after.png',
+      'slackcli messages draft --recipient-id C0123456789 --message "Heads-up @alice" --at "2026-11-06 09:00"',
     ],
     json:
-      '{ channel_id, draft_id, thread_ts?, replaced?, file_ids? } (thread_ts only for a threaded draft; ' +
-      'replaced: true when --replace overwrote an existing draft; file_ids only with --file).',
+      '{ channel_id, draft_id, thread_ts?, replaced?, file_ids?, date_scheduled? } (thread_ts only for a ' +
+      'threaded draft; replaced: true when --replace overwrote an existing draft; file_ids only with --file; ' +
+      'date_scheduled is the Unix send time when the draft is scheduled).',
     browserOnly: true,
     notes: [
       RECIPIENT_NOTE,
@@ -253,7 +271,11 @@ const HELP = {
       REPLY_LINK_NOTE,
       MESSAGE_TEXT_NOTE,
       STDIN_NOTE,
+      TEXT_MENTION_NOTE,
       DRAFT_FILE_NOTE,
+      'Exactly one of --at or --in may be given to schedule the draft. ' + SCHEDULE_TIME_NOTE,
+      'A scheduled draft is sent by Slack at that time, like "messages schedule". It keeps its files, ' +
+        'and --replace keeps an existing send time unless --at or --in changes it.',
       'Slack keeps one unsent draft per channel or thread, so a second draft there fails with ' +
         'attached_draft_exists. --replace overwrites the existing draft in place instead.',
       'Creates the draft immediately, with no confirmation prompt.',
@@ -270,13 +292,17 @@ const HELP = {
       'slackcli messages update-draft --draft-id Dr0123456789 --message-file ./v2.md --json',
       'slackcli messages update-draft --draft-id Dr0123456789 --message "Revised text" --file ./after.png',
     ],
-    json: '{ draft_id, channel_id, file_ids? } (file_ids only with --file).',
+    json:
+      '{ draft_id, channel_id, file_ids?, date_scheduled? } (file_ids only with --file; date_scheduled is ' +
+      'the Unix send time when the draft is scheduled).',
     browserOnly: true,
     dryRun: true,
     notes: [
       MESSAGE_TEXT_NOTE,
       STDIN_NOTE,
-      'Without --file the draft keeps the files it already has; with --file the files listed replace them.',
+      TEXT_MENTION_NOTE,
+      'Without --file the draft keeps the files it already has; with --file the files listed replace them. ' +
+        'A scheduled draft keeps its send time.',
       'Updates the draft immediately, with no confirmation prompt.',
     ],
   },
@@ -349,6 +375,7 @@ const HELP = {
       REPLY_LINK_NOTE,
       MESSAGE_TEXT_NOTE,
       STDIN_NOTE,
+      TEXT_MENTION_NOTE,
       'With --blocks the message text is the notification fallback.',
       'Schedules immediately, with no confirmation prompt.',
       'A dry run to a user ID does not open the DM; it previews the user as the target.',
@@ -494,12 +521,6 @@ function resolveTargetArg(
   });
 }
 
-// The recipient of a send or draft: --recipient-id (an ID, link or name) or
-// --permalink, resolved to a channel or user ID. A user's DM is not opened
-// yet, so a dry run can stop here without opening it.
-//
-// `check` runs on the client before anything is asked of Slack, for a command
-// that must refuse an auth type before its first call.
 // Plain @handle / @FirstName / @U… mentions in the text become real mentions;
 // names that match nobody (or more than one person) stay plain text, with a warning.
 async function withMentions(client: SlackClient, message: string, spinner: ReturnType<typeof ora>): Promise<string> {
@@ -508,14 +529,20 @@ async function withMentions(client: SlackClient, message: string, spinner: Retur
   spinner.text = previous;
   if (result.unresolved.length > 0) {
     spinner.clear();
-    process.stderr.write(
-      `Warning: left as plain text (no single matching user): ${result.unresolved.map((n) => `@${n}`).join(', ')}. ` +
-        'Use the handle (slackcli search people <name>) or <@U…>.\n',
+    warning(
+      `Left as plain text (no single matching user): ${result.unresolved.map((n) => `@${n}`).join(', ')}. ` +
+        'Use the handle (slackcli search people <name>) or <@U…>.',
     );
   }
   return result.text;
 }
 
+// The recipient of a send or draft: --recipient-id (an ID, link or name) or
+// --permalink, resolved to a channel or user ID. A user's DM is not opened
+// yet, so a dry run can stop here without opening it.
+//
+// `check` runs on the client before anything is asked of Slack, for a command
+// that must refuse an auth type before its first call.
 async function resolveRecipient(
   options: { permalink?: string; recipientId?: string; threadTs?: string; workspace?: string },
   spinner: ReturnType<typeof ora>,
@@ -1078,6 +1105,8 @@ export function createMessagesCommand(): Command {
     )
     .option('--thread-ts <timestamp>', 'Thread to draft a reply in (1234567890.123456 or p1234567890123456)')
     .option('--permalink <url>', 'Slack message link; drafts a reply in that message\'s thread (replaces --recipient-id and --thread-ts)')
+    .option('--at <time>', 'Schedule the draft to send at: Unix seconds, ISO 8601 with an offset, or a local "YYYY-MM-DD HH:MM"')
+    .option('--in <duration>', 'Schedule the draft to send after this delay: 45m, 2h, 3d, 1h30m')
     .option('--replace', 'Overwrite the unsent draft already in this channel or thread instead of failing with attached_draft_exists', false)
     .option('--file <path>', `Attach a local file to the draft (repeat for several, up to ${MAX_DRAFT_FILES})`, collectDraftFile, [] as string[])
     .option('--workspace <id|name>', 'Workspace to use')
@@ -1088,6 +1117,9 @@ export function createMessagesCommand(): Command {
 
       try {
         let message = await resolveMessageText(options);
+        const scheduledAt = options.at !== undefined || options.in !== undefined
+          ? parseScheduleTime({ at: options.at, in: options.in })
+          : undefined;
         const files = await checkDraftFiles(options.file);
         const { client, recipientId, target } = await resolveRecipient(options, spinner);
         message = await withMentions(client, message, spinner);
@@ -1095,9 +1127,11 @@ export function createMessagesCommand(): Command {
         if (options.dryRun) {
           client.requireBrowserAuth(DRAFT_CREATE_AUTH_MESSAGE);
           spinner.stop();
-          const payload = files.length
-            ? { text: message, files: files.map((file) => ({ file: file.path, file_size: file.size })) }
-            : { text: message };
+          const payload = {
+            text: message,
+            ...(files.length ? { files: files.map((file) => ({ file: file.path, file_size: file.size })) } : {}),
+            ...(scheduledAt !== undefined ? { date_scheduled: scheduledAt } : {}),
+          };
           emitDryRun(
             await buildPreview(client, 'create draft', recipientTarget(recipientId, target.threadTs), payload, { lookupName: true }),
             options.json,
@@ -1117,18 +1151,27 @@ export function createMessagesCommand(): Command {
           : undefined;
         if (existing) {
           spinner.text = 'Replacing the existing draft...';
-          response = await client.updateDraft(existing, message, fileIds.length ? { file_ids: fileIds } : {});
+          response = await client.updateDraft(existing, message, {
+            ...(fileIds.length ? { file_ids: fileIds } : {}),
+            ...(scheduledAt !== undefined ? { date_scheduled: scheduledAt } : {}),
+          });
           // drafts.update answers with the updated draft; keep the id we sent
           // if a future Slack response omits it.
           response = { ...response, draft: { ...(response.draft ?? {}), id: response.draft?.id ?? existing.id } };
           replaced = true;
         } else {
-          spinner.text = 'Creating draft...';
+          spinner.text = scheduledAt !== undefined ? 'Creating and scheduling draft...' : 'Creating draft...';
           response = await client.createDraft(channelId, message, {
             thread_ts: target.threadTs,
             file_ids: fileIds,
+            ...(scheduledAt !== undefined ? { date_scheduled: scheduledAt } : {}),
           });
         }
+
+        const keptSchedule = existing?.date_scheduled && existing.date_scheduled > Date.now() / 1000
+          ? existing.date_scheduled
+          : undefined;
+        const reportedSchedule = scheduledAt ?? keptSchedule;
 
         spinner.succeed(replaced ? 'Draft replaced successfully!' : 'Draft created successfully!');
         if (options.json) {
@@ -1140,7 +1183,15 @@ export function createMessagesCommand(): Command {
             ...(replaced ? { replaced: true } : {}),
             ...(target.threadTs ? { thread_ts: target.threadTs } : {}),
             ...(fileIds.length ? { file_ids: fileIds } : {}),
+            ...(reportedSchedule !== undefined ? { date_scheduled: reportedSchedule } : {}),
           });
+        } else if (reportedSchedule !== undefined) {
+          writeText(formatScheduledConfirmation({
+            channel_id: channelId,
+            scheduled_message_id: response.draft.id,
+            post_at: reportedSchedule,
+            ...(target.threadTs ? { thread_ts: target.threadTs } : {}),
+          }));
         } else {
           success(`Draft ID: ${response.draft.id}`);
         }
@@ -1193,7 +1244,12 @@ export function createMessagesCommand(): Command {
         await client.updateDraft(draft, message, fileIds.length ? { file_ids: fileIds } : {});
         spinner.succeed('Draft updated successfully!');
         if (options.json) {
-          writeJson({ draft_id: draft.id, channel_id: channelId, ...(fileIds.length ? { file_ids: fileIds } : {}) });
+          writeJson({
+            draft_id: draft.id,
+            channel_id: channelId,
+            ...(fileIds.length ? { file_ids: fileIds } : {}),
+            ...(draft.date_scheduled && draft.date_scheduled > 0 ? { date_scheduled: draft.date_scheduled } : {}),
+          });
         } else {
           success(`Draft ID: ${draft.id}`);
         }

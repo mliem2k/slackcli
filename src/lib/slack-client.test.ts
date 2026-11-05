@@ -867,6 +867,70 @@ describe('SlackClient.createDraft with files', () => {
   });
 });
 
+describe('SlackClient.createDraft with a send time', () => {
+  const POST_AT = 1791791400;
+
+  it('creates the draft, then sets the time with drafts.update', async () => {
+    const client = new TestSlackClient();
+
+    const response = await client.createDraft('C123', 'Standup <@U1>', {
+      thread_ts: '1712345678.000100',
+      file_ids: ['F1'],
+      date_scheduled: POST_AT,
+    });
+
+    expect(client.calls.map((call) => call.method)).toEqual(['drafts.create', 'drafts.update']);
+    expect(client.calls[0]!.params).not.toHaveProperty('date_scheduled');
+    const update = client.calls[1]!.params;
+    expect(update.draft_id).toBe('Dr123');
+    expect(update.date_scheduled).toBe(POST_AT);
+    expect(update.is_from_composer).toBe('true');
+    expect(JSON.parse(update.file_ids as string)).toEqual(['F1']);
+    expect(JSON.parse(update.destinations as string)).toEqual([
+      { channel_id: 'C123', thread_ts: '1712345678.000100', broadcast: false },
+    ]);
+    const blocks = JSON.parse(update.blocks as string);
+    expect(blocks[0].elements[0].elements).toContainEqual({ type: 'user', user_id: 'U1' });
+    expect(response.draft.id).toBe('Dr123');
+  });
+
+  it('deletes the new draft when its send time cannot be set', async () => {
+    const client = new TestSlackClient();
+    const request = client.request.bind(client);
+    spyOn(client, 'request').mockImplementation(async (method, params = {}) => {
+      if (method === 'drafts.update') throw new Error('invalid_arguments');
+      return request(method, params);
+    });
+
+    await expect(client.createDraft('C123', 'hi', { date_scheduled: POST_AT }))
+      .rejects.toThrow('invalid_arguments');
+
+    expect(client.calls.map((call) => call.method)).toEqual(['drafts.create', 'drafts.delete']);
+  });
+
+  it('still throws the update error when the cleanup delete fails too', async () => {
+    const client = new TestSlackClient();
+    const request = client.request.bind(client);
+    spyOn(client, 'request').mockImplementation(async (method, params = {}) => {
+      if (method === 'drafts.update') throw new Error('update failed');
+      if (method === 'drafts.delete') throw new Error('delete failed');
+      return request(method, params);
+    });
+
+    await expect(client.createDraft('C123', 'hi', { date_scheduled: POST_AT }))
+      .rejects.toThrow('update failed');
+  });
+
+  it('refuses a create response without an id before scheduling anything', async () => {
+    const client = new TestSlackClient();
+    spyOn(client, 'request').mockResolvedValue({ ok: true } as never);
+
+    await expect(client.createDraft('C123', 'hi', { date_scheduled: POST_AT }))
+      .rejects.toThrow('without an id');
+    expect(client.calls).toEqual([]);
+  });
+});
+
 describe('SlackClient.deleteDraft', () => {
   it('sends the draft id and current timestamp to the browser-only endpoint', async () => {
     const client = new TestSlackClient();
@@ -926,6 +990,35 @@ describe('SlackClient.updateDraft', () => {
     expect(JSON.parse(client.calls[0]!.params.file_ids as string)).toEqual(['F1', 'F2']);
     expect(JSON.parse(client.calls[1]!.params.file_ids as string)).toEqual(['F9']);
     expect(JSON.parse(client.calls[2]!.params.file_ids as string)).toEqual([]);
+  });
+
+  it('sets a new send time, and keeps the existing one on a text-only update', async () => {
+    const scheduled = { ...draft, date_scheduled: 1893456000 };
+    const client = new TestSlackClient();
+
+    await client.updateDraft(scheduled, 'new text');
+    await client.updateDraft(scheduled, 'new time', { date_scheduled: 1893459600 });
+
+    expect(client.calls[0]!.params.date_scheduled).toBe(1893456000);
+    expect(client.calls[0]!.params.is_from_composer).toBe('true');
+    expect(client.calls[1]!.params.date_scheduled).toBe(1893459600);
+  });
+
+  it('does not send a date_scheduled key for an unscheduled draft', async () => {
+    const client = new TestSlackClient();
+
+    await client.updateDraft(draft, 'new text');
+
+    expect(client.calls[0]!.params).not.toHaveProperty('date_scheduled');
+    expect(client.calls[0]!.params.is_from_composer).toBe('false');
+  });
+
+  it('drops a send time that has already passed instead of echoing it back', async () => {
+    const client = new TestSlackClient();
+
+    await client.updateDraft({ ...draft, date_scheduled: 1 }, 'new text');
+
+    expect(client.calls[0]!.params).not.toHaveProperty('date_scheduled');
   });
 
   it('never goes backwards when this machine\'s clock is behind Slack\'s', () => {
