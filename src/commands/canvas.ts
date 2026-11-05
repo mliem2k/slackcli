@@ -160,6 +160,30 @@ const HELP = {
       'Needs the canvases:write scope.',
     ],
   },
+  editCell: {
+    summary: 'Edit one table cell by driving a browser',
+    browserOnly: true,
+    description:
+      'Edit one cell of a table in a canvas by driving a real browser window, for workspaces where ' +
+      'canvases.edit is blocked. The cell is found by the exact text of another cell in its row ' +
+      '(--row-anchor) and a column offset from it, then the edit is confirmed by re-reading the canvas.',
+    examples: [
+      'slackcli canvas edit-cell F0123456789 --row-anchor "Release 1.2" --column-offset 2 --text "Done"',
+      'slackcli canvas edit-cell F0123456789 --under-heading "Week #2" --row-anchor "Alice" --column-offset 1 --text "" --json',
+      'slackcli canvas edit-cell F0123456789 --row-anchor "Release 1.2" --occurrence 2 --column-offset 0 --text "Renamed" --headless',
+    ],
+    json: '{ ok, before, after }.',
+    notes: [
+      '<canvas-id> takes a canvas file ID (F...).',
+      '--column-offset 0 edits the anchor cell itself; --text "" clears the cell.',
+      '--under-heading limits the search to the table under a heading with exactly that text, and a row too ' +
+        'narrow for --column-offset then fails instead of the search moving on; --skip-narrow-rows restores skipping.',
+      '--occurrence picks the Nth match when the anchor text is not unique.',
+      'Needs a browser session profile that is signed in; --headless only works when it already is.',
+      'Edits immediately, with no confirmation prompt and no --dry-run, then polls the canvas for up to ' +
+        'about 18 seconds to confirm the edit persisted.',
+    ],
+  },
 } satisfies Record<string, CommandHelp>;
 
 // Warn when a pasted link points at a different workspace than the one we will call,
@@ -521,9 +545,7 @@ export function createCanvasCommand(): Command {
   // canvases.edit, which Slack rejects for xoxc/xoxd session tokens
   // (not_allowed_token_type); this works around that for the one shape of
   // edit that comes up in practice, setting a cell in an existing table.
-  canvas
-    .command('edit-cell')
-    .description('Edit one table cell in a canvas by driving a real browser (for workspaces where canvases.edit is blocked)')
+  describeCommand(canvas.command('edit-cell'), HELP.editCell)
     .argument('<canvas-id>', 'Canvas file ID (e.g., F1234567890)')
     .requiredOption('--row-anchor <text>', 'Exact text of an existing cell that identifies the target row')
     .option(
