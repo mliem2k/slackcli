@@ -168,7 +168,7 @@ slackcli messages send --permalink="$LINK" --message="On it 👀"
 | Upload a file with a message | `slackcli messages send --file=./report.pdf …` | [messages](docs/user-guide/messages.md) |
 | Post rich Block Kit content | `slackcli messages send --blocks=@blocks.json …` | [messages](docs/user-guide/messages.md) |
 | Review active drafts | `slackcli messages list-drafts` | [messages](docs/user-guide/messages.md) |
-| Post a message later | `slackcli messages schedule --in=2h …` | [messages](docs/user-guide/messages.md#messages-schedule) |
+| Post a message later | `slackcli messages schedule --at="tomorrow 9am" …` | [messages](docs/user-guide/messages.md#messages-schedule) |
 | Script it / feed an AI agent | `… --json \| jq` | [scripting & JSON](docs/user-guide/scripting.md) |
 | Juggle several workspaces | `slackcli conversations list --workspace=automation-bot` | [workspaces](docs/user-guide/workspaces.md) |
 | Fix something that broke | `slackcli auth whoami` | [troubleshooting](docs/user-guide/troubleshooting.md) |
@@ -328,7 +328,7 @@ slackcli messages draft --recipient-id=C123 --message="Draft for later"
 slackcli messages list-drafts --json
 slackcli messages send-draft Dr123 --yes --json               # post, then remove draft
 slackcli messages delete-draft Dr456 --yes                    # discard draft
-slackcli messages schedule --recipient-id=C123 --message="Standup in 10" --at="2026-10-12 09:50"
+slackcli messages schedule --recipient-id=C123 --message="Standup in 10" --at="tomorrow 9am"
 slackcli messages schedule --recipient-id=C123 --message="Window closed" --in=2h --json
 slackcli messages list-scheduled --json
 slackcli messages delete-scheduled Q123 --yes                 # cancel before it posts

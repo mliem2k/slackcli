@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Relative schedule times**: `messages schedule` accepts `--at "today 18:30"` or `--at "tomorrow 9am"` (12-hour `9am` / `9:30pm` or 24-hour `09:30` / `09:30:15`), read in this machine's timezone, alongside the existing Unix, ISO 8601 and local date-time forms; `saved add|update --due` takes them too
+
 ## [0.19.0] - 2026-11-01
 
 ### Removed

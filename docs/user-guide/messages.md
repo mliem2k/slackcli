@@ -477,6 +477,9 @@ script that scheduled it can exit and the machine can be off.
 # At a local date and time (this machine's timezone)
 slackcli messages schedule --recipient-id C0123456789 --message "Standup in 10 minutes" --at "2026-10-12 09:50"
 
+# Tomorrow at 09:00, in this machine's timezone
+slackcli messages schedule --recipient-id C0123456789 --message "Heads-up @alice" --at "tomorrow 9am"
+
 # After a delay
 slackcli messages schedule --recipient-id="#general" --message "Deploy window closed" --in 2h
 
@@ -511,13 +514,14 @@ Exactly one of the two is required.
 | `--at` | Unix seconds | `--at 1791791400` |
 | `--at` | ISO 8601 with an offset or `Z` | `--at 2026-10-12T09:50:00+02:00`, `--at 2026-10-12T07:50:00Z` |
 | `--at` | A local date and time, read in this machine's timezone (`T` or a space; seconds optional) | `--at "2026-10-12 09:50"` |
+| `--at` | `today` or `tomorrow` and a clock time (`9am`, `9:30pm`, `09:30`, `09:30:15`), in this machine's timezone | `--at "tomorrow 9am"`, `--at "today 18:30"` |
 | `--in` | Minutes, hours and days, each at most once | `--in 45m`, `--in 2h`, `--in 3d`, `--in 1h30m` |
 
-Nothing else is guessed at: a date without a time, `tomorrow`, or `9am` is
-refused with `invalid_input`, and so is a date that does not exist
-(`2026-02-30`). The resolved time is always echoed with its timezone, and
-`post_at` in the JSON output is the same instant in Unix seconds, so a local
-time can be checked before it matters.
+Nothing else is guessed at: a relative day without a time (`tomorrow`), a bare
+time (`9am`), or a date without a time is refused with `invalid_input`, and so
+is a date that does not exist (`2026-02-30`). The resolved time is always
+echoed with its timezone, and `post_at` in the JSON output is the same instant
+in Unix seconds, so a local time can be checked before it matters.
 
 Around a clock change a local time can be ambiguous. One that is skipped when
 the clocks go forward (02:30 on that night) is refused; one that happens twice

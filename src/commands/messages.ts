@@ -48,6 +48,11 @@ const MESSAGE_TEXT_NOTE =
 const STDIN_NOTE =
   '--message-file - reads the text from piped standard input (no shell quoting, no temp file); ' +
   'one trailing newline is dropped. A terminal on stdin, more than 1 MB, or a pipe still open after 5 minutes is refused.';
+const SCHEDULE_TIME_NOTE =
+  '--at takes Unix seconds, ISO 8601 with an offset or Z (2026-11-06T09:00:00+01:00), a local date and ' +
+  'time ("2026-11-06 09:00"), or a relative day and time ("tomorrow 9am", "today 18:30"), read in this ' +
+  'machine\'s timezone. --in takes minutes, hours and days: 45m, 2h, 3d, 1h30m. The time must be in the ' +
+  'future and at most 120 days ahead.';
 const RECIPIENT_NOTE =
   '--recipient-id takes a channel ID (C...), a user ID (U..., opens a DM), a Slack URL, ' +
   'a channel name (#general) or a user (@alice, alice@example.com). A bare name must match ' +
@@ -280,6 +285,7 @@ const HELP = {
       'slackcli messages schedule --recipient-id C0123456789 --message "Standup in 10 minutes" --at "2026-10-12 09:50"',
       'slackcli messages schedule --recipient-id="#general" --message "Deploy window closed" --in 2h',
       'slackcli messages schedule --recipient-id C0123456789 --message-file ./notes.md --at 2026-10-12T09:50:00+02:00 --json',
+      'slackcli messages schedule --recipient-id U0123456789 --message "Reminder" --at "tomorrow 9am"',
       'slackcli messages schedule --recipient-id U0123456789 --message "Reminder" --in 1h30m --dry-run',
     ],
     json:
@@ -287,12 +293,10 @@ const HELP = {
       'thread_ts is there only for a reply in a thread. channel_id is always the resolved ID.',
     standardOnly: true,
     notes: [
-      'Exactly one of --at or --in is required. --at takes Unix seconds, ISO 8601 with an offset or Z ' +
-        '(2026-10-12T09:50:00+02:00), or a local date and time ("2026-10-12 09:50", seconds optional) ' +
-        'read in this machine\'s timezone. --in takes minutes, hours and days, each at most once: 45m, 2h, 3d, 1h30m.',
-      'The time must be in the future and at most 120 days ahead. A date that does not exist, or a local ' +
-        'time skipped when the clocks go forward, is refused; a local time that happens twice when the clocks ' +
-        'go back is read as the first of the two. The resolved time is always echoed with its timezone.',
+      'Exactly one of --at or --in is required. ' + SCHEDULE_TIME_NOTE,
+      'A date that does not exist, or a local time skipped when the clocks go forward, is refused; a local ' +
+        'time that happens twice when the clocks go back is read as the first of the two. The resolved time ' +
+        'is always echoed with its timezone.',
       'Slack allows 30 scheduled messages per channel in any 5-minute window, and a scheduled message ' +
         'cannot carry a file.',
       RECIPIENT_NOTE,
@@ -1150,7 +1154,7 @@ export function createMessagesCommand(): Command {
     .option('--thread-ts <timestamp>', 'Thread to schedule a reply in (1234567890.123456 or p1234567890123456)')
     .option('--permalink <url>', 'Slack message link; schedules a reply in that message\'s thread (replaces --recipient-id and --thread-ts)')
     .option('--blocks <json|@file>', 'Block Kit JSON array, inline or loaded from @file')
-    .option('--at <time>', 'When to post: Unix seconds, ISO 8601 with an offset, or a local "YYYY-MM-DD HH:MM"')
+    .option('--at <time>', 'When to post: Unix seconds, ISO 8601, a local "YYYY-MM-DD HH:MM", or "tomorrow 9am"')
     .option('--in <duration>', 'How long from now to post: 45m, 2h, 3d, 1h30m')
     .option('--workspace <id|name>', 'Workspace to use')
     .option('--json', 'Output the scheduled message as JSON', false)
