@@ -170,7 +170,7 @@ slackcli messages send --permalink="$LINK" --message="On it 👀"
 | Review active drafts | `slackcli messages list-drafts` | [messages](docs/user-guide/messages.md) |
 | Mention someone by handle | `slackcli messages draft --message="Heads-up @alice" …` | [messages](docs/user-guide/messages.md#mentions-handle) |
 | Post a message later | `slackcli messages schedule --in=2h …` | [messages](docs/user-guide/messages.md#messages-schedule) |
-| Schedule a draft to send | `slackcli messages draft --at="2026-11-06 09:00" …` | [messages](docs/user-guide/messages.md#scheduling-a-draft---at---in) |
+| Schedule a draft to send | `slackcli messages draft --at="tomorrow 9am" …` | [messages](docs/user-guide/messages.md#scheduling-a-draft---at---in) |
 | Script it / feed an AI agent | `… --json \| jq` | [scripting & JSON](docs/user-guide/scripting.md) |
 | Juggle several workspaces | `slackcli conversations list --workspace=automation-bot` | [workspaces](docs/user-guide/workspaces.md) |
 | Fix something that broke | `slackcli auth whoami` | [troubleshooting](docs/user-guide/troubleshooting.md) |
@@ -335,7 +335,7 @@ slackcli messages delete-draft Dr456 --yes                    # discard draft
 slackcli messages draft --recipient-id=C123 --message-file=./v2.md --replace   # overwrite the draft already there
 slackcli messages update-draft --draft-id=Dr123 --message="New text"
 slackcli messages draft --recipient-id=C123 --message="Before and after" --file=./before.png --file=./after.png   # attach files (up to 10)
-slackcli messages draft --recipient-id=C123 --message="Heads-up @alice" --at="2026-11-06 09:00"   # real mention, scheduled
+slackcli messages draft --recipient-id=C123 --message="Heads-up @alice" --at="tomorrow 9am"   # real mention, scheduled
 slackcli messages schedule --recipient-id=C123 --message="Standup in 10" --at="2026-10-12 09:50"
 slackcli messages schedule --recipient-id=C123 --message="Window closed" --in=2h --json
 slackcli messages list-scheduled --json
