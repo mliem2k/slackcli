@@ -50,4 +50,25 @@ describe('parseMrkdwn lists', () => {
     expect(fenced).toHaveLength(1);
     expect(fenced[0].type).toBe('rich_text_section');
   });
+
+  it('continues numbering after a nested list instead of restarting at 1', () => {
+    const els = blocks('1. a\n  • sub\n2. b\n3. c');
+    expect(els.map((e) => [e.style, e.indent, e.offset ?? 0, e.elements.length])).toEqual([
+      ['ordered', 0, 0, 1],
+      ['bullet', 1, 0, 1],
+      ['ordered', 0, 1, 2],
+    ]);
+  });
+
+  it('restarts numbering after prose and for a new nested list', () => {
+    const els = blocks('1. a\n2. b\n\nText\n1. c\n  1. x\n2. d\n  1. y');
+    const lists = els.filter((e) => e.type === 'rich_text_list');
+    expect(lists.map((e) => [e.indent, e.offset ?? 0])).toEqual([[0, 0], [0, 0], [1, 0], [0, 1], [1, 0]]);
+  });
+
+  it('treats a fence opened mid-line as code', () => {
+    const els = blocks('see ```\n- not a list\n```');
+    expect(els).toHaveLength(1);
+    expect(els[0].type).toBe('rich_text_section');
+  });
 });
