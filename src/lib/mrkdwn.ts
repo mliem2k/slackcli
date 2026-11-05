@@ -16,6 +16,7 @@ type RichTextElement = (
   | { type: 'channel'; channel_id: string }
   | { type: 'broadcast'; range: 'here' | 'channel' | 'everyone' }
   | { type: 'link'; url: string; text?: string }
+  | { type: 'emoji'; name: string }
 ) & { style?: RichTextStyle };
 
 interface RichTextSection {
@@ -32,9 +33,16 @@ interface RichTextList {
   elements: RichTextSection[];
 }
 
+interface RichTextPreformatted {
+  type: 'rich_text_preformatted';
+  elements: Array<{ type: 'text'; text: string }>;
+}
+
+type RichTextBlockElement = RichTextSection | RichTextList | RichTextPreformatted;
+
 interface RichTextBlock {
   type: 'rich_text';
-  elements: Array<RichTextSection | RichTextList>;
+  elements: RichTextBlockElement[];
 }
 
 // Markers and their corresponding style keys
@@ -123,6 +131,14 @@ function styleSpan(inner: string, styleKey: keyof RichTextStyle): RichTextElemen
 // Try every marker at position `i`, returning the span's elements and the index to
 // continue the walk from, or null when no marker applies there.
 function tryMatchMarker(text: string, i: number): MarkerMatch | null {
+  // ```x``` on one line is inline code too, as Slack renders it.
+  if (text.startsWith('```', i)) {
+    const end = text.indexOf('```', i + 3);
+    const inner = end === -1 ? '' : text.substring(i + 3, end);
+    if (inner && !inner.includes('\n')) {
+      return { elements: [{ type: 'text', text: inner, style: { code: true } }], nextIndex: end + 3 };
+    }
+  }
   for (const [marker, styleKey] of MARKERS) {
     const span = findSpan(text, marker, i);
     if (!span) continue;
@@ -195,13 +211,27 @@ function tryMatchToken(text: string, i: number): MarkerMatch | null {
   return element ? { elements: [element], nextIndex: end + 1 } : null;
 }
 
+// An emoji shortcode such as ":pray:" or ":+1:". Plain-text messages get these
+// from Slack's own mrkdwn rendering; rich_text needs an explicit emoji element or
+// the shortcode shows literally. The name needs a letter or starts with + or -
+// (":+1:", ":-1:"), and the opening colon must not follow a letter or digit, so
+// "10:30" and "a:b:c" stay text.
+const EMOJI = /^:([a-z0-9_+'-]*[a-z][a-z0-9_+'-]*|[+-][a-z0-9_+'-]+):/;
+
+function tryMatchEmoji(text: string, i: number): MarkerMatch | null {
+  if (text[i] !== ':') return null;
+  if (i > 0 && /[A-Za-z0-9]/.test(text[i - 1])) return null;
+  const match = EMOJI.exec(text.slice(i, i + 102));
+  return match ? { elements: [{ type: 'emoji', name: match[1] }], nextIndex: i + match[0].length } : null;
+}
+
 function parseInline(text: string): RichTextElement[] {
   const elements: RichTextElement[] = [];
 
   let i = 0;
   while (i < text.length) {
     // Tokens go first so a marker character inside a URL never opens a span
-    const match = tryMatchToken(text, i) ?? tryMatchMarker(text, i);
+    const match = tryMatchToken(text, i) ?? tryMatchEmoji(text, i) ?? tryMatchMarker(text, i);
     if (match) {
       elements.push(...match.elements);
       i = match.nextIndex;
@@ -223,6 +253,8 @@ const LIST_LINE = /^([ \t]*)(?:([•\-])|(\d+)[.)])[ \t]+(.*)$/;
 interface ListLine {
   style: 'bullet' | 'ordered';
   indent: number;
+  /** The number typed on an ordered line ("3." gives 3), 0 for a bullet. */
+  number: number;
   text: string;
 }
 
@@ -230,12 +262,64 @@ function listLine(line: string): ListLine | null {
   const match = LIST_LINE.exec(line);
   if (!match) return null;
   const width = match[1].replace(/\t/g, '  ').length;
-  return { style: match[2] ? 'bullet' : 'ordered', indent: Math.min(Math.floor(width / 2), 8), text: match[4] };
+  return {
+    style: match[2] ? 'bullet' : 'ordered',
+    indent: Math.min(Math.floor(width / 2), 8),
+    number: match[3] ? Number.parseInt(match[3], 10) : 0,
+    text: match[4],
+  };
 }
 
 function section(text: string): RichTextSection {
   const elements = parseInline(text);
   return { type: 'rich_text_section', elements: elements.length > 0 ? elements : [{ type: 'text', text: '' }] };
+}
+
+// One logical piece of a message that has lists: a prose line, a list item, or
+// a whole fenced code block.
+type Segment =
+  | { kind: 'prose'; text: string }
+  | { kind: 'item'; item: ListLine }
+  | { kind: 'code'; text: string };
+
+const FENCE = '```';
+
+// Split the text into segments. A line with an odd number of ``` opens or
+// closes a fence there: text before the fence stays on its side (prose before an
+// opening fence, code before a closing one). A line with an even number is
+// inline code and is classified normally, so "- use ```x``` here" is an item.
+function segment(text: string): Segment[] {
+  const segments: Segment[] = [];
+  let code: string[] | null = null;
+  for (const line of text.split('\n')) {
+    const fences = line.split(FENCE).length - 1;
+    if (code === null) {
+      if (fences % 2 === 0) {
+        const item = listLine(line);
+        segments.push(item ? { kind: 'item', item } : { kind: 'prose', text: line });
+        continue;
+      }
+      const at = line.lastIndexOf(FENCE);
+      const before = line.slice(0, at).trimEnd();
+      if (before) segments.push({ kind: 'prose', text: before });
+      const after = line.slice(at + FENCE.length);
+      code = after ? [after] : [];
+    } else {
+      if (fences % 2 === 0) {
+        code.push(line);
+        continue;
+      }
+      const at = line.indexOf(FENCE);
+      if (at > 0) code.push(line.slice(0, at));
+      segments.push({ kind: 'code', text: code.join('\n') });
+      code = null;
+      const after = line.slice(at + FENCE.length).trim();
+      if (after) segments.push({ kind: 'prose', text: after });
+    }
+  }
+  // An unclosed fence stays code to the end, as Slack renders it.
+  if (code !== null) segments.push({ kind: 'code', text: code.join('\n') });
+  return segments;
 }
 
 export function parseMrkdwn(text: string): RichTextBlock[] {
@@ -245,60 +329,93 @@ export function parseMrkdwn(text: string): RichTextBlock[] {
   // Lines that start with "• ", "- " or "1. " become rich_text_list blocks, the
   // structure Slack's own composer writes for a list, so they render as a real list
   // (hanging indent, numbering) instead of literal bullet characters.
-  const lines = text.split('\n');
-  // A fenced code block can hold list-looking lines; never turn those into a list.
-  let inFence = false;
-  const kinds = lines.map((line) => {
-    const fences = (line.match(/```/g) ?? []).length;
-    if (fences > 0) {
-      // A line that opens or closes a fence (anywhere on it) is never a list item.
-      if (fences % 2 === 1) inFence = !inFence;
-      return null;
-    }
-    return inFence ? null : listLine(line);
-  });
-
-  if (kinds.every((kind) => kind === null)) {
+  const segments = segment(text);
+  if (!segments.some((part) => part.kind === 'item')) {
     return [{ type: 'rich_text', elements: [section(text)] }];
   }
 
-  const elements: Array<RichTextSection | RichTextList> = [];
-  // Ordered items already emitted per indent level in the current run of list lines.
+  const elements: RichTextBlockElement[] = [];
+  // Per indent level, in the current run of list lines: how many ordered items
+  // are shown, and the style of the last list. Prose or code ends the run.
   const numbered = new Map<number, number>();
+  const styles = new Map<number, 'bullet' | 'ordered'>();
   let prose: string[] = [];
+  const endRun = () => {
+    numbered.clear();
+    styles.clear();
+  };
   const flushProse = () => {
     if (prose.length === 0) return;
     // The line break before a list belongs to the list, as in Slack's composer.
     const body = prose.join('\n').replace(/\n$/, '');
     if (body.length > 0 || elements.length === 0) elements.push(section(body));
     prose = [];
-    numbered.clear();
+    endRun();
   };
 
-  lines.forEach((line, index) => {
-    const item = kinds[index];
-    if (!item) {
+  for (const part of segments) {
+    if (part.kind === 'prose') {
       // A blank line right after a list is the list's own spacing, not text.
-      if (prose.length === 0 && elements.at(-1)?.type === 'rich_text_list' && line === '') return;
-      prose.push(line);
-      return;
+      if (prose.length === 0 && elements.at(-1)?.type === 'rich_text_list' && part.text === '') continue;
+      prose.push(part.text);
+      continue;
     }
     flushProse();
-    // Going back up a level restarts the numbering of every deeper level.
-    for (const level of numbered.keys()) if (level > item.indent) numbered.delete(level);
+    if (part.kind === 'code') {
+      elements.push({ type: 'rich_text_preformatted', elements: [{ type: 'text', text: part.text }] });
+      endRun();
+      continue;
+    }
+
+    const item = part.item;
+    // Going back up a level restarts every deeper level.
+    for (const level of [...numbered.keys()]) if (level > item.indent) numbered.delete(level);
+    for (const level of [...styles.keys()]) if (level > item.indent) styles.delete(level);
+
     const last = elements.at(-1);
     if (last?.type === 'rich_text_list' && last.style === item.style && last.indent === item.indent) {
       last.elements.push(section(item.text));
     } else {
+      // Slack's message view draws a list that comes back up from a nested list
+      // in the style of the earlier list at that level ("1." under a bullet list
+      // shows as a bullet). An empty section in between ends that run; it takes
+      // no space on screen.
+      const earlier = styles.get(item.indent);
+      if (earlier && earlier !== item.style && last?.type === 'rich_text_list' && last.indent > item.indent) {
+        elements.push({ type: 'rich_text_section', elements: [] });
+      }
       const list: RichTextList = { type: 'rich_text_list', style: item.style, indent: item.indent, elements: [section(item.text)] };
-      const before = item.style === 'ordered' ? numbered.get(item.indent) ?? 0 : 0;
+      // Continue from the items already shown at this level, or from the number
+      // typed when it is higher ("2." after a bullet at the same level, as in
+      // Markdown). "1." on every line still counts up through the counter.
+      const before = item.style === 'ordered'
+        ? Math.max(numbered.get(item.indent) ?? 0, Math.min(item.number, 10_000) - 1)
+        : 0;
       if (before > 0) list.offset = before;
       elements.push(list);
     }
-    if (item.style === 'ordered') numbered.set(item.indent, (numbered.get(item.indent) ?? 0) + 1);
-    else numbered.delete(item.indent);
-  });
+
+    styles.set(item.indent, item.style);
+    if (item.style === 'ordered') {
+      // The number this item is shown with: the list's offset plus its position.
+      const current = elements.at(-1) as RichTextList;
+      numbered.set(item.indent, (current.offset ?? 0) + current.elements.length);
+    } else {
+      numbered.delete(item.indent);
+    }
+  }
   flushProse();
 
   return [{ type: 'rich_text', elements }];
+}
+
+/**
+ * The rich_text blocks for a message whose text has list lines, or undefined
+ * when it has none. Send, edit and schedule post plain text, which Slack renders
+ * without lists; they pass these blocks only when there is a list to show, so
+ * every other message keeps Slack's own text rendering exactly as before.
+ */
+export function listBlocksFor(text: string): RichTextBlock[] | undefined {
+  const blocks = parseMrkdwn(text);
+  return blocks[0].elements.some((element) => element.type === 'rich_text_list') ? blocks : undefined;
 }

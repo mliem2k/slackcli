@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { parseMrkdwn } from './mrkdwn';
+import { listBlocksFor, parseMrkdwn } from './mrkdwn';
 
 const blocks = (text: string) => parseMrkdwn(text)[0].elements as any[];
 const sectionText = (el: any) => el.elements.map((e: any) => e.text ?? `<@${e.user_id}>`).join('');
@@ -70,5 +70,85 @@ describe('parseMrkdwn lists', () => {
     const els = blocks('see ```\n- not a list\n```');
     expect(els).toHaveLength(1);
     expect(els[0].type).toBe('rich_text_section');
+  });
+
+  it('keeps a list line with inline ```code``` in the list', () => {
+    const els = blocks('- use ```x``` here\n- b');
+    expect(els).toHaveLength(1);
+    expect(els[0].elements).toHaveLength(2);
+    expect(blocks('1. a ```x```\n2. b')[0].elements).toHaveLength(2);
+  });
+
+  it('continues from the typed number after a same-level bullet', () => {
+    const els = blocks('1. a\n- b\n2. c');
+    expect(els.map((e) => [e.style, e.offset ?? 0])).toEqual([['ordered', 0], ['bullet', 0], ['ordered', 1]]);
+  });
+
+  it('counts up through "1." on every line after a nested list', () => {
+    const els = blocks('1. a\n  • s\n1. b\n  • t\n1. c');
+    expect(els.filter((e) => e.indent === 0).map((e) => e.offset ?? 0)).toEqual([0, 1, 2]);
+  });
+});
+
+describe('parseMrkdwn emoji', () => {
+  const inline = (text: string) => (parseMrkdwn(text)[0].elements[0] as any).elements;
+
+  it('turns a shortcode into an emoji element', () => {
+    expect(inline('thanks :pray: :+1:')).toEqual([
+      { type: 'text', text: 'thanks ' },
+      { type: 'emoji', name: 'pray' },
+      { type: 'text', text: ' ' },
+      { type: 'emoji', name: '+1' },
+    ]);
+  });
+
+  it('leaves times, words with colons and code alone', () => {
+    expect(inline('at 10:30:45')).toEqual([{ type: 'text', text: 'at 10:30:45' }]);
+    expect(inline('a:b:c')).toEqual([{ type: 'text', text: 'a:b:c' }]);
+    expect(inline('`:pray:`')).toEqual([{ type: 'text', text: ':pray:', style: { code: true } }]);
+  });
+});
+
+describe('listBlocksFor', () => {
+  it('returns blocks only when the text has a list', () => {
+    expect(listBlocksFor('plain text :pray:')).toBeUndefined();
+    expect(listBlocksFor('Intro\n• a\n• b')?.[0].elements.map((e: any) => e.type)).toEqual(['rich_text_section', 'rich_text_list']);
+  });
+});
+
+describe('parseMrkdwn lists in sent messages', () => {
+  const types = (text: string) => blocks(text).map((e: any) => (e.type === 'rich_text_list' ? `${e.style}${e.indent}${e.offset ? '+' + e.offset : ''}` : e.type.replace('rich_text_', '')));
+
+  it('separates a numbered list coming back up from a nested bullet under a bullet list', () => {
+    expect(types('• a\n  • n\n1. one\n  • d\n2. two')).toEqual(['bullet0', 'bullet1', 'section', 'ordered0', 'bullet1', 'ordered0+1']);
+  });
+
+  it('adds no separator between adjacent lists at the same level', () => {
+    expect(types('• a\n1. one')).toEqual(['bullet0', 'ordered0']);
+  });
+
+  it('turns a fenced block into preformatted text, with prose before and after', () => {
+    const els = blocks('• a\nsee ```\n- not a list\n```\nafter');
+    expect(els.map((e: any) => e.type)).toEqual(['rich_text_list', 'rich_text_section', 'rich_text_preformatted', 'rich_text_section']);
+    expect(els[2].elements[0].text).toBe('- not a list');
+    expect(sectionText(els[1])).toBe('see');
+    expect(sectionText(els[3])).toBe('after');
+  });
+
+  it('keeps an unclosed fence as code to the end', () => {
+    const els = blocks('• a\n```\n- x');
+    expect(els.at(-1).type).toBe('rich_text_preformatted');
+    expect(els.at(-1).elements[0].text).toBe('- x');
+  });
+});
+
+describe('parseMrkdwn inline triple backticks', () => {
+  it('renders ```x``` on one line as inline code', () => {
+    const item = blocks('- use ```x``` here')[0].elements[0].elements;
+    expect(item).toEqual([
+      { type: 'text', text: 'use ' },
+      { type: 'text', text: 'x', style: { code: true } },
+      { type: 'text', text: ' here' },
+    ]);
   });
 });

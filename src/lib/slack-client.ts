@@ -14,7 +14,7 @@ import type {
   SlackScheduledMessageListResponse,
   WorkspaceConfig,
 } from '../types/index.ts';
-import { parseMrkdwn } from './mrkdwn.ts';
+import { listBlocksFor, parseMrkdwn } from './mrkdwn.ts';
 import { extractSlackWorkspaceName } from './curl-parser.ts';
 import { RateLimiter, slackRateLimiter } from './rate-limiter.ts';
 import { decideRetry, parseRetryAfter, resolveRetryOptions } from './retry.ts';
@@ -659,7 +659,8 @@ export class SlackClient {
   } = {}): Promise<any> {
     const params: Record<string, any> = { channel, text };
     if (options.thread_ts) params.thread_ts = options.thread_ts;
-    if (options.blocks) params.blocks = options.blocks;
+    const blocks = options.blocks ?? listBlocksFor(text);
+    if (blocks) params.blocks = blocks;
 
     return this.request('chat.postMessage', params);
   }
@@ -675,7 +676,8 @@ export class SlackClient {
     // `parse` must be explicit: chat.update defaults it to `client` (unlike
     // chat.postMessage, which defaults to `none`), and that escapes the
     // `<url|label>` markup in the text, so editing a message kills its links.
-    return this.request('chat.update', { channel, ts, text, parse: 'none' });
+    const blocks = listBlocksFor(text);
+    return this.request('chat.update', { channel, ts, text, parse: 'none', ...(blocks ? { blocks } : {}) });
   }
 
   async deleteMessage(channel: string, ts: string): Promise<any> {
@@ -919,7 +921,8 @@ export class SlackClient {
 
     const params: Record<string, any> = { channel, text, post_at: postAt };
     if (options.thread_ts) params.thread_ts = options.thread_ts;
-    if (options.blocks) params.blocks = options.blocks;
+    const blocks = options.blocks ?? listBlocksFor(text);
+    if (blocks) params.blocks = blocks;
 
     return this.request('chat.scheduleMessage', params);
   }
