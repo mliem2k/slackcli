@@ -166,6 +166,59 @@ describe('SlackClient.uploadFileExternal', () => {
   });
 });
 
+describe('SlackClient.uploadFileForDraft', () => {
+  it('stages the bytes and completes the upload without a channel, so the file stays private', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'slackcli-draft-upload-'));
+    const filePath = join(dir, 'after.png');
+    await Bun.write(filePath, 'png bytes');
+    globalThis.fetch = (async (_input, _init) => new Response('', { status: 200 })) as typeof fetch;
+
+    try {
+      const client = new TestSlackClient();
+
+      const fileId = await client.uploadFileForDraft(filePath);
+
+      expect(fileId).toBe('F123');
+      expect(client.calls).toEqual([
+        { method: 'files.getUploadURLExternal', params: { filename: 'after.png', length: 9 } },
+        {
+          method: 'files.completeUploadExternal',
+          params: { files: JSON.stringify([{ id: 'F123', title: 'after.png' }]) },
+        },
+      ]);
+      expect(client.calls[1]?.params).not.toHaveProperty('channel_id');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not complete the upload when the byte transfer fails', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'slackcli-draft-upload-fail-'));
+    const filePath = join(dir, 'after.png');
+    await Bun.write(filePath, 'png bytes');
+    globalThis.fetch = (async (_input, _init) => new Response('', { status: 500 })) as typeof fetch;
+
+    try {
+      const client = new TestSlackClient();
+
+      await expect(client.uploadFileForDraft(filePath)).rejects.toThrow('File upload failed: HTTP 500');
+      expect(client.calls.map((call) => call.method)).toEqual(['files.getUploadURLExternal']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a standard token before reading the file or calling Slack', async () => {
+    const client = new SlackClient({
+      workspace_id: 'T123', workspace_name: 'Test Workspace',
+      auth_type: 'standard', token: 'xoxb-test', token_type: 'bot',
+    });
+
+    await expect(client.uploadFileForDraft('/tmp/slackcli-missing-file.png'))
+      .rejects.toThrow(DRAFT_CREATE_AUTH_MESSAGE);
+  });
+});
+
 describe('SlackClient.fetchFile', () => {
   it('uses bearer authentication for standard tokens', async () => {
     let headers: Headers | undefined;
@@ -543,6 +596,18 @@ describe('SlackClient.createDraft', () => {
   });
 });
 
+describe('SlackClient.createDraft with files', () => {
+  it('sends the file ids it was given, and an empty list by default', async () => {
+    const client = new TestSlackClient();
+
+    await client.createDraft('C123', 'with files', { file_ids: ['F1', 'F2'] });
+    await client.createDraft('C123', 'no files');
+
+    expect(JSON.parse(client.calls[0]!.params.file_ids as string)).toEqual(['F1', 'F2']);
+    expect(JSON.parse(client.calls[1]!.params.file_ids as string)).toEqual([]);
+  });
+});
+
 describe('SlackClient.deleteDraft', () => {
   it('sends the draft id and current timestamp to the browser-only endpoint', async () => {
     const client = new TestSlackClient();
@@ -589,6 +654,19 @@ describe('SlackClient.updateDraft', () => {
     // Echoing the server's own last_updated_ts is rejected with draft_has_conflict.
     expect(call.params.client_last_updated_ts).not.toBe(draft.last_updated_ts);
     expect(Number(call.params.client_last_updated_ts)).toBeGreaterThan(Number(draft.last_updated_ts));
+  });
+
+  it('keeps the draft\'s files on a text-only update, and replaces them when new ids are given', async () => {
+    const withFiles = { ...draft, file_ids: ['F1', 'F2'] };
+    const client = new TestSlackClient();
+
+    await client.updateDraft(withFiles, 'text only');
+    await client.updateDraft(withFiles, 'new files', { file_ids: ['F9'] });
+    await client.updateDraft(draft, 'no files at all');
+
+    expect(JSON.parse(client.calls[0]!.params.file_ids as string)).toEqual(['F1', 'F2']);
+    expect(JSON.parse(client.calls[1]!.params.file_ids as string)).toEqual(['F9']);
+    expect(JSON.parse(client.calls[2]!.params.file_ids as string)).toEqual([]);
   });
 
   it('never goes backwards when this machine\'s clock is behind Slack\'s', () => {

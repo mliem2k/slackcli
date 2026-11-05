@@ -66,7 +66,7 @@ They hold no Slack API knowledge.
 | `name-resolver.ts` | Channel names (`#general`) and user handles / emails → IDs. `parseNameReference()` is pure, so an ID or URL never reaches Slack; `resolveIdentifier()` is the per-argument entry point commands call after `slack-url-parser.ts` (it also drops the `@`/`#` from a prefixed ID), and `resolveUserList()` resolves a `<users...>` list with one shared `users.list` scan. Exact, case-insensitive matches only; nothing found throws `NotFoundError`, several matches `InvalidInputError`. `lazyClient()` lets write commands create a client only when a lookup needs one, so their no-auth confirmation refusal is unchanged. |
 | `message-input.ts` | Resolves the text of `messages send`/`edit`/`draft` from `--message`, `--message-file <path>` or `--message-file -` (stdin). The stdin read is bounded (1 MB, 5 minutes, a zero-length chunk ends it); stdin and the TTY check are injectable for tests. |
 | `mrkdwn.ts` | Slack mrkdwn → `rich_text` blocks (drafts). |
-| `drafts.ts` | Validates draft-list limits, extracts text from `rich_text`, and projects undocumented responses into the public command contract. |
+| `drafts.ts` | Validates draft-list limits, extracts text from `rich_text`, projects undocumented responses into the public command contract, and checks and uploads the files a draft carries (`--file`). |
 | `canvas-parser.ts` | Slack canvas HTML → Markdown. |
 | `canvas-read.ts` | `canvas read`'s work: resolves the canvas ID (explicit or a channel's canvas), downloads its HTML, and resolves `<@U…>` / `<#C…>` mentions. Expected failures throw `CanvasReadError` carrying their exit code. |
 | `rate-limiter.ts` | Concurrency cap and minimum interval shared by every Slack API call. Logs waits at `debug`. |

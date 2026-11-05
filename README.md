@@ -324,6 +324,7 @@ slackcli messages send-draft Dr123 --yes --json               # post, then remov
 slackcli messages delete-draft Dr456 --yes                    # discard draft
 slackcli messages draft --recipient-id=C123 --message-file=./v2.md --replace   # overwrite the draft already there
 slackcli messages update-draft --draft-id=Dr0123 --message="New text"
+slackcli messages draft --recipient-id=C123 --message="Before and after" --file=./before.png --file=./after.png   # attach files (up to 10)
 ```
 
 > [!NOTE]

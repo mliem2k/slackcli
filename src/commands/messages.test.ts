@@ -124,6 +124,25 @@ describe('messages command', () => {
     expect(longOptions('draft')).toContain('--replace');
   });
 
+  it('lets draft and update-draft attach files, repeating --file for several', () => {
+    for (const name of ['draft', 'update-draft']) {
+      expect(longOptions(name)).toContain('--file');
+    }
+    const command = createMessagesCommand();
+    const draft = command.commands.find((candidate) => candidate.name() === 'draft')!;
+    draft.exitOverride().configureOutput({ writeErr: () => {} });
+    draft.action(() => {});
+    draft.parse(['--message=hi', '--file=a.png', '--file=b.png'], { from: 'user' });
+    expect(draft.opts().file).toEqual(['a.png', 'b.png']);
+  });
+
+  it('defaults --file to no files on draft and update-draft', () => {
+    for (const name of ['draft', 'update-draft']) {
+      const command = createMessagesCommand().commands.find((candidate) => candidate.name() === name)!;
+      expect(command.options.find((option) => option.long === '--file')?.defaultValue).toEqual([]);
+    }
+  });
+
   it('exposes update-draft by draft id, with the draft id mandatory', () => {
     expect(subcommand('update-draft')).toBeDefined();
     expect(mandatoryOptions('update-draft')).toEqual(['--draft-id']);

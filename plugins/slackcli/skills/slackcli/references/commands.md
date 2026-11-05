@@ -68,7 +68,7 @@ messages send --recipient-id=<C…|U…|url|"#name"|@handle|email> (--message=T 
 messages send --permalink=URL --message=T          # reply in that thread
 messages edit (--channel-id=C --timestamp=TS | --permalink=URL) (--message=T | --message-file=F|-) [--json]
 messages react (--channel-id=C --timestamp=TS | --permalink=URL) --emoji=NAME
-messages draft --recipient-id=C (--message=T | --message-file=F|-) [--json]    # browser auth only
+messages draft --recipient-id=C (--message=T | --message-file=F|-) [--file=PATH ...] [--json]    # browser auth only; --file repeats, up to 10, private until sent
 messages send-draft Dr… [--yes] [--json]                                     # post, then delete draft
 messages delete-draft Dr… [--yes] [--json]                                   # discard draft
 messages list-drafts [--limit=100] [--json]                                  # browser auth only

@@ -1,8 +1,58 @@
 import type { DraftSummary, SlackDraft, SlackDraftListResponse } from '../types/index.ts';
 import type { SlackClient } from './slack-client.ts';
 import { InvalidInputError, NotFoundError } from './cli-errors.ts';
+import { checkUploadFile } from './slack-client.ts';
 
 const POSITIVE_INTEGER = /^[1-9]\d*$/;
+
+// Slack lets a message carry at most this many files.
+export const MAX_DRAFT_FILES = 10;
+
+// Commander accumulator for a repeatable --file option.
+export function collectDraftFile(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+export interface CheckedDraftFile {
+  path: string;
+  filename: string;
+  size: number;
+}
+
+// The local checks that run before any Slack call: a sane count, no repeated
+// path, and every path a non-empty regular file. `messages draft --dry-run`
+// runs them too, so a bad attachment is reported before anything is uploaded.
+export async function checkDraftFiles(paths: string[] = []): Promise<CheckedDraftFile[]> {
+  if (paths.length > MAX_DRAFT_FILES) {
+    throw new InvalidInputError(`A draft can carry at most ${MAX_DRAFT_FILES} files, got ${paths.length}`);
+  }
+  const duplicate = paths.find((path, index) => paths.indexOf(path) !== index);
+  if (duplicate !== undefined) {
+    throw new InvalidInputError(`--file was given twice for the same path: ${duplicate}`);
+  }
+  const checked: CheckedDraftFile[] = [];
+  for (const path of paths) {
+    checked.push({ path, ...(await checkUploadFile(path)) });
+  }
+  return checked;
+}
+
+// Upload each file privately, in the order given, and return the ids a draft
+// takes. Files are checked first, so a missing or empty path uploads nothing.
+// A failure partway leaves the earlier uploads as private, unshared files.
+export async function uploadDraftFiles(
+  client: Pick<SlackClient, 'uploadFileForDraft'>,
+  paths: string[] = [],
+  options: { onProgress?: (message: string) => void } = {},
+): Promise<string[]> {
+  const files = await checkDraftFiles(paths);
+  const ids: string[] = [];
+  for (const [index, file] of files.entries()) {
+    options.onProgress?.(`Uploading file ${index + 1} of ${files.length}...`);
+    ids.push(await client.uploadFileForDraft(file.path));
+  }
+  return ids;
+}
 
 export function parseDraftLimit(value: string): number {
   if (!POSITIVE_INTEGER.test(value)) {

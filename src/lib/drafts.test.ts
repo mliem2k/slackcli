@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'bun:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
+  checkDraftFiles,
+  collectDraftFile,
   extractDraftText,
   fetchActiveRawDrafts,
   fetchDrafts,
@@ -7,9 +12,11 @@ import {
   loadActiveDraft,
   findDraftById,
   findDraftForDestination,
+  MAX_DRAFT_FILES,
   parseDraftLimit,
   projectDraft,
   sendDraft,
+  uploadDraftFiles,
   validateSendableDraft,
 } from './drafts.ts';
 import type { SlackDraftListResponse } from '../types/index.ts';
@@ -363,5 +370,94 @@ describe('finding drafts to replace or delete', () => {
 
     expect(drafts.map((draft) => draft.id)).toEqual(['DrChannel']);
     expect(drafts[0]?.last_updated_ts).toBe('10.000000');
+  });
+});
+
+describe('draft attachments', () => {
+  async function withFiles<T>(names: string[], run: (paths: string[]) => Promise<T>): Promise<T> {
+    const dir = await mkdtemp(join(tmpdir(), 'slackcli-draft-files-'));
+    try {
+      const paths = [];
+      for (const name of names) {
+        const path = join(dir, name);
+        await Bun.write(path, `bytes of ${name}`);
+        paths.push(path);
+      }
+      return await run(paths);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('collects a repeated --file in the order given', () => {
+    expect(collectDraftFile('b.png', collectDraftFile('a.png', []))).toEqual(['a.png', 'b.png']);
+    expect(collectDraftFile('a.png')).toEqual(['a.png']);
+  });
+
+  it('accepts no files, and reports each file name and size', async () => {
+    expect(await checkDraftFiles()).toEqual([]);
+    await withFiles(['one.png'], async ([path]) => {
+      expect(await checkDraftFiles([path!])).toEqual([{ path, filename: 'one.png', size: 'bytes of one.png'.length }]);
+    });
+  });
+
+  it('refuses more than the Slack limit before touching any file', async () => {
+    const paths = Array.from({ length: MAX_DRAFT_FILES + 1 }, (_, index) => `/tmp/slackcli-missing-${index}.png`);
+    await expect(checkDraftFiles(paths)).rejects.toThrow(`at most ${MAX_DRAFT_FILES} files`);
+  });
+
+  it('refuses the same path twice', async () => {
+    await withFiles(['one.png'], async ([path]) => {
+      await expect(checkDraftFiles([path!, path!])).rejects.toThrow('given twice');
+    });
+  });
+
+  it('refuses a missing or empty file', async () => {
+    await expect(checkDraftFiles(['/tmp/slackcli-missing-file.png'])).rejects.toThrow('File not found');
+    const dir = await mkdtemp(join(tmpdir(), 'slackcli-draft-empty-'));
+    try {
+      const empty = join(dir, 'empty.png');
+      await Bun.write(empty, '');
+      await expect(checkDraftFiles([empty])).rejects.toThrow('empty file');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads in the order given and returns the ids in that order', async () => {
+    await withFiles(['a.png', 'b.png', 'c.png'], async (paths) => {
+      const uploaded: string[] = [];
+      const progress: string[] = [];
+      const client = {
+        uploadFileForDraft: async (path: string) => {
+          uploaded.push(path);
+          return `F${uploaded.length}`;
+        },
+      };
+
+      const ids = await uploadDraftFiles(client, paths, { onProgress: (message) => progress.push(message) });
+
+      expect(ids).toEqual(['F1', 'F2', 'F3']);
+      expect(uploaded).toEqual(paths);
+      expect(progress).toEqual(['Uploading file 1 of 3...', 'Uploading file 2 of 3...', 'Uploading file 3 of 3...']);
+    });
+  });
+
+  it('uploads nothing when a later path is bad', async () => {
+    await withFiles(['a.png'], async ([path]) => {
+      let uploads = 0;
+      const client = { uploadFileForDraft: async () => `F${++uploads}` };
+
+      await expect(uploadDraftFiles(client, [path!, '/tmp/slackcli-missing-file.png'])).rejects.toThrow('File not found');
+      expect(uploads).toBe(0);
+    });
+  });
+
+  it('returns no ids and makes no call for no files', async () => {
+    let uploads = 0;
+    const client = { uploadFileForDraft: async () => `F${++uploads}` };
+
+    expect(await uploadDraftFiles(client)).toEqual([]);
+    expect(uploads).toBe(0);
   });
 });

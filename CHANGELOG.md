@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Files on a draft with `--file`**: `messages draft --recipient-id C0123456789 --message "Before and after" --file ./before.png --file ./after.png` attaches local files to an unsent draft, so a screenshot rides with the text and a human sends it from Slack
+  - Repeatable, up to 10 files (Slack's limit for one message); each is uploaded first, in the order given, and the file ids go on the draft (`file_ids` in the `--json` output)
+  - The upload is private: it is completed without a channel, so nothing is shared until the draft is sent. Missing, empty or non-regular paths, a repeated path and more than 10 files are refused before any upload; `--dry-run` runs the same checks and reports each file's name and size
+  - `update-draft --file` and `draft --replace --file` replace the draft's files; without `--file` the draft now keeps the files it has, where an update used to clear them. `send-draft` still refuses a draft that carries files
 - **Releases are announced on Discord**: after a stable release is published and the Homebrew tap is updated, the release workflow posts the version, a link to the GitHub Release, the release notes and the Homebrew install hint to the Shaharia Lab Discord release channel. Pre-release tags are not announced, a re-run does not post twice, and a Discord failure never fails the release (#358)
 
 ## [0.14.0] - 2026-10-03
