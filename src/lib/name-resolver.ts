@@ -396,3 +396,99 @@ export async function resolveUserList(
   }
   return ids;
 }
+
+// A plain `@name` in message text: after the start, whitespace or opening
+// punctuation (so an email address or `<@U…>` never matches), ending on a
+// letter or digit (so a trailing period stays out).
+const TEXT_MENTION = /(^|[\s([{"'])@([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)/g;
+// Code spans and blocks are left as typed.
+const CODE_SPAN = /(```[\s\S]*?```|`[^`\n]*`)/;
+// Broadcasts ping everyone, so they are never converted from plain text.
+const BROADCAST_WORDS = new Set(['here', 'channel', 'everyone']);
+const USER_ID_PATTERN = /^[UW][A-Z0-9]{6,}$/;
+
+export interface TextMentionResult {
+  text: string;
+  resolved: Array<{ name: string; id: string }>;
+  /** Names left as plain text: no match, or more than one. */
+  unresolved: string[];
+}
+
+function mentionNames(text: string): string[] {
+  const names = new Set<string>();
+  text.split(CODE_SPAN).forEach((part, index) => {
+    if (index % 2 === 1) return;
+    for (const match of part.matchAll(TEXT_MENTION)) {
+      const name = match[2];
+      if (!BROADCAST_WORDS.has(name.toLowerCase()) && !isIdLike(name)) names.add(name.toLowerCase());
+    }
+  });
+  return [...names];
+}
+
+function firstName(user: any): string {
+  const real = typeof user?.real_name === 'string' ? user.real_name : user?.profile?.real_name;
+  return typeof real === 'string' ? real.trim().split(/\s+/)[0].toLowerCase() : '';
+}
+
+/**
+ * Turn plain `@handle` (and `@FirstName`) mentions in message text into
+ * `<@U…>` tokens, which the mrkdwn parser renders as real mentions. A handle
+ * must match exactly; a first name is used only when exactly one active
+ * person has it. Anything else stays plain text and is reported back, so the
+ * CLI still never guesses who to ping. No `@` in the text means no lookup.
+ */
+export async function resolveTextMentions(
+  source: NameLookupClientSource,
+  text: string,
+  options: ResolveOptions = {},
+): Promise<TextMentionResult> {
+  const names = mentionNames(text);
+  if (names.length === 0) {
+    // Only raw user IDs (or nothing): convert without a lookup.
+    const out = text.split(CODE_SPAN).map((part, index) => (index % 2 === 1 ? part : part.replace(
+      TEXT_MENTION,
+      (whole, lead: string, name: string) => (USER_ID_PATTERN.test(name) ? `${lead}<@${name}>` : whole),
+    )));
+    return { text: out.join(''), resolved: [], unresolved: [] };
+  }
+
+  const client = await clientFrom(source);
+  const wanted = new Set(names);
+  const { matches } = await scanPages(
+    (cursor) => client.listUsers({ limit: PAGE_LIMIT, ...(cursor ? { cursor } : {}) }),
+    (response) => response?.members ?? [],
+    (user) => user?.deleted !== true && user?.is_bot !== true && typeof user?.name === 'string'
+      && (wanted.has(user.name.toLowerCase()) || wanted.has(firstName(user))),
+    (page) => options.onProgress?.(`Looking up mentions (page ${page})...`),
+  );
+
+  const idFor = new Map<string, string>();
+  for (const name of names) {
+    const byHandle = matches.filter((user) => user.name.toLowerCase() === name);
+    const byFirstName = matches.filter((user) => firstName(user) === name);
+    const found = byHandle.length > 0 ? byHandle : byFirstName;
+    if (found.length === 1) idFor.set(name, found[0].id);
+  }
+
+  const resolved: TextMentionResult['resolved'] = [];
+  const unresolved = new Set<string>();
+  const out = text.split(CODE_SPAN).map((part, index) => {
+    if (index % 2 === 1) return part;
+    return part.replace(TEXT_MENTION, (whole, lead: string, name: string) => {
+      const key = name.toLowerCase();
+      if (BROADCAST_WORDS.has(key)) return whole;
+      if (USER_ID_PATTERN.test(name)) return `${lead}<@${name}>`;
+      if (isIdLike(name)) return whole;
+      const id = idFor.get(key);
+      if (!id) {
+        unresolved.add(name);
+        return whole;
+      }
+      if (!resolved.some((r) => r.id === id && r.name === name)) resolved.push({ name, id });
+      return `${lead}<@${id}>`;
+    });
+  });
+  logger.debug('Text mentions resolved', { resolved: resolved.length, unresolved: unresolved.size });
+  return { text: out.join(''), resolved, unresolved: [...unresolved] };
+}

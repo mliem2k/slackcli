@@ -42,6 +42,7 @@ import { failCommand } from '../lib/command-errors.ts';
 import { InvalidInputError, NotFoundError } from '../lib/cli-errors.ts';
 import { resolveIdentifier, resolveUserList, lazyClient, splitUserRefs } from '../lib/name-resolver.ts';
 import { resolveMessageText } from '../lib/message-input.ts';
+import { resolveTextMentions } from '../lib/name-resolver.ts';
 import { parseScheduleTime } from '../lib/schedule-time.ts';
 import { deleteMessage, removeReaction } from '../lib/message.ts';
 import { resolvePostThread } from '../lib/thread-parent.ts';
@@ -499,6 +500,22 @@ function resolveTargetArg(
 //
 // `check` runs on the client before anything is asked of Slack, for a command
 // that must refuse an auth type before its first call.
+// Plain @handle / @FirstName / @U… mentions in the text become real mentions;
+// names that match nobody (or more than one person) stay plain text, with a warning.
+async function withMentions(client: SlackClient, message: string, spinner: ReturnType<typeof ora>): Promise<string> {
+  const previous = spinner.text;
+  const result = await resolveTextMentions(client, message, { onProgress: (text) => { spinner.text = text; } });
+  spinner.text = previous;
+  if (result.unresolved.length > 0) {
+    spinner.clear();
+    process.stderr.write(
+      `Warning: left as plain text (no single matching user): ${result.unresolved.map((n) => `@${n}`).join(', ')}. ` +
+        'Use the handle (slackcli search people <name>) or <@U…>.\n',
+    );
+  }
+  return result.text;
+}
+
 async function resolveRecipient(
   options: { permalink?: string; recipientId?: string; threadTs?: string; workspace?: string },
   spinner: ReturnType<typeof ora>,
@@ -763,10 +780,11 @@ export function createMessagesCommand(): Command {
       const spinner = ora('Sending message...').start();
 
       try {
-        const message = await resolveMessageText(options);
+        let message = await resolveMessageText(options);
         const blocks = options.blocks ? await parseBlocksInput(options.blocks) : undefined;
 
         const send = await resolveSendTarget(options, spinner);
+        message = await withMentions(send.client, message, spinner);
 
         // --file is repeatable, so options.file is a string[] (or undefined).
         const filePaths: string[] | undefined = options.file;
@@ -912,7 +930,7 @@ export function createMessagesCommand(): Command {
       const spinner = ora('Updating message...').start();
 
       try {
-        const message = await resolveMessageText(options);
+        let message = await resolveMessageText(options);
         const target = resolveMessageTarget(
           { permalink: options.permalink, channelId: options.channelId, timestamp: options.timestamp },
           { channel: '--channel-id', timestamp: '--timestamp' }
@@ -921,6 +939,7 @@ export function createMessagesCommand(): Command {
         const client = await getAuthenticatedClient(options.workspace);
         warnOnWorkspaceMismatch(client, target.workspace);
         const channelId = await resolveTargetArg(client, options.channelId, target.channelId, '--channel-id', spinner);
+        message = await withMentions(client, message, spinner);
 
         if (options.dryRun) {
           spinner.stop();
@@ -1068,9 +1087,10 @@ export function createMessagesCommand(): Command {
       const spinner = ora('Creating draft...').start();
 
       try {
-        const message = await resolveMessageText(options);
+        let message = await resolveMessageText(options);
         const files = await checkDraftFiles(options.file);
         const { client, recipientId, target } = await resolveRecipient(options, spinner);
+        message = await withMentions(client, message, spinner);
 
         if (options.dryRun) {
           client.requireBrowserAuth(DRAFT_CREATE_AUTH_MESSAGE);
@@ -1144,9 +1164,10 @@ export function createMessagesCommand(): Command {
       const spinner = ora('Updating draft...').start();
 
       try {
-        const message = await resolveMessageText(options);
+        let message = await resolveMessageText(options);
         const files = await checkDraftFiles(options.file);
         const client = await getAuthenticatedClient(options.workspace);
+        message = await withMentions(client, message, spinner);
         const draft = findDraftById(await fetchActiveRawDrafts(client), options.draftId);
         if (!draft) {
           throw new NotFoundError(`No active draft ${options.draftId} found (it may have been sent or deleted)`);
@@ -1281,11 +1302,12 @@ export function createMessagesCommand(): Command {
       const spinner = ora('Scheduling message...').start();
 
       try {
-        const message = await resolveMessageText(options);
+        let message = await resolveMessageText(options);
         const blocks = options.blocks ? await parseBlocksInput(options.blocks) : undefined;
         // After the text is read, so a slow pipe on stdin does not eat into --in.
         const postAt = parseScheduleTime({ at: options.at, in: options.in });
         const { client, recipientId, target } = await resolveRecipient(options, spinner, requireSchedulingAuth);
+        message = await withMentions(client, message, spinner);
 
         if (options.dryRun) {
           spinner.stop();
