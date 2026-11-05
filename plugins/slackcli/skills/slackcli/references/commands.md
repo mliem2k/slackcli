@@ -81,7 +81,8 @@ messages edit (--channel-id=C --timestamp=TS | --permalink=URL) (--message=T | -
 messages delete (--channel-id=C --timestamp=TS | --permalink=URL) [--yes] [--json]   # chat.delete; retry-safe
 messages react (--channel-id=C --timestamp=TS | --permalink=URL) --emoji=NAME [--json]
 messages unreact (--channel-id=C --timestamp=TS | --permalink=URL) --emoji=NAME [--json]   # reactions.remove, your own reaction only; retry-safe
-messages draft --recipient-id=C (--message=T | --message-file=F|-) [--json]    # browser auth only
+messages draft --recipient-id=C (--message=T | --message-file=F|-) [--file=PATH ...] [--replace] [--json]    # browser auth only; --file repeats, up to 10, private until sent
+messages update-draft --draft-id=Dr (--message=T | --message-file=F|-) [--file=PATH ...] [--json]    # browser auth only; keeps the draft's files unless --file is given
 messages send-draft Dr… [--yes] [--json]                                     # post, then delete draft
 messages delete-draft Dr… [--yes] [--json]                                   # discard draft
 messages list-drafts [--limit=100] [--json]                                  # browser auth only

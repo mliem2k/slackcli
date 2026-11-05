@@ -330,6 +330,9 @@ slackcli messages draft --recipient-id=C123 --message-file=./v2.md --replace   #
 slackcli messages update-draft --draft-id=Dr123 --message="New text"
 slackcli messages send-draft Dr123 --yes --json               # post, then remove draft
 slackcli messages delete-draft Dr456 --yes                    # discard draft
+slackcli messages draft --recipient-id=C123 --message-file=./v2.md --replace   # overwrite the draft already there
+slackcli messages update-draft --draft-id=Dr123 --message="New text"
+slackcli messages draft --recipient-id=C123 --message="Before and after" --file=./before.png --file=./after.png   # attach files (up to 10)
 slackcli messages schedule --recipient-id=C123 --message="Standup in 10" --at="2026-10-12 09:50"
 slackcli messages schedule --recipient-id=C123 --message="Window closed" --in=2h --json
 slackcli messages list-scheduled --json

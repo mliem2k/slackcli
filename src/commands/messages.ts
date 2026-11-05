@@ -3,13 +3,17 @@ import ora from 'ora';
 import { readFile } from 'node:fs/promises';
 import { getAuthenticatedClient } from '../lib/auth.ts';
 import {
+  checkDraftFiles,
+  collectDraftFile,
   fetchActiveRawDrafts,
   fetchDrafts,
   findDraftById,
   findDraftForDestination,
   loadActiveDraft,
+  MAX_DRAFT_FILES,
   parseDraftLimit,
   sendDraft,
+  uploadDraftFiles,
   validateSendableDraft,
 } from '../lib/drafts.ts';
 import {
@@ -64,6 +68,11 @@ const RECIPIENT_NOTE =
 const LIMIT_NOTE = '--limit must be a positive integer (default 100).';
 const MESSAGE_ID_FORMATS_NOTE =
   '--channel-id takes a channel ID, a Slack URL or a channel name; --timestamp takes 1712345678.123456 or p1712345678123456.';
+
+const DRAFT_FILE_NOTE =
+  `--file attaches a local file to the draft and can be repeated, up to ${MAX_DRAFT_FILES} files. ` +
+  'The file is uploaded privately and stays unshared until the draft is sent from Slack; ' +
+  '"messages send-draft" refuses a draft that carries files.';
 
 // --help content, kept apart from the command chains below (#324).
 const HELP = {
@@ -227,10 +236,11 @@ const HELP = {
     examples: [
       'slackcli messages draft --recipient-id C0123456789 --message "Release notes for review"',
       'slackcli messages draft --permalink https://acme.slack.com/archives/C0123456789/p1712345678123456 --message-file ./reply.md --json',
+      'slackcli messages draft --recipient-id C0123456789 --message "Before and after" --file ./before.png --file ./after.png',
     ],
     json:
-      '{ channel_id, draft_id, thread_ts?, replaced? } (thread_ts only for a threaded draft; ' +
-      'replaced: true when --replace overwrote an existing draft).',
+      '{ channel_id, draft_id, thread_ts?, replaced?, file_ids? } (thread_ts only for a threaded draft; ' +
+      'replaced: true when --replace overwrote an existing draft; file_ids only with --file).',
     browserOnly: true,
     notes: [
       RECIPIENT_NOTE,
@@ -242,6 +252,7 @@ const HELP = {
       REPLY_LINK_NOTE,
       MESSAGE_TEXT_NOTE,
       STDIN_NOTE,
+      DRAFT_FILE_NOTE,
       'Slack keeps one unsent draft per channel or thread, so a second draft there fails with ' +
         'attached_draft_exists. --replace overwrites the existing draft in place instead.',
       'Creates the draft immediately, with no confirmation prompt.',
@@ -256,13 +267,15 @@ const HELP = {
     examples: [
       'slackcli messages update-draft --draft-id Dr0123456789 --message "Revised release notes"',
       'slackcli messages update-draft --draft-id Dr0123456789 --message-file ./v2.md --json',
+      'slackcli messages update-draft --draft-id Dr0123456789 --message "Revised text" --file ./after.png',
     ],
-    json: '{ draft_id, channel_id }.',
+    json: '{ draft_id, channel_id, file_ids? } (file_ids only with --file).',
     browserOnly: true,
     dryRun: true,
     notes: [
       MESSAGE_TEXT_NOTE,
       STDIN_NOTE,
+      'Without --file the draft keeps the files it already has; with --file the files listed replace them.',
       'Updates the draft immediately, with no confirmation prompt.',
     ],
   },
@@ -1047,6 +1060,7 @@ export function createMessagesCommand(): Command {
     .option('--thread-ts <timestamp>', 'Thread to draft a reply in (1234567890.123456 or p1234567890123456)')
     .option('--permalink <url>', 'Slack message link; drafts a reply in that message\'s thread (replaces --recipient-id and --thread-ts)')
     .option('--replace', 'Overwrite the unsent draft already in this channel or thread instead of failing with attached_draft_exists', false)
+    .option('--file <path>', `Attach a local file to the draft (repeat for several, up to ${MAX_DRAFT_FILES})`, collectDraftFile, [] as string[])
     .option('--workspace <id|name>', 'Workspace to use')
     .option('--json', 'Output the created draft as JSON', false)
     .option(DRY_RUN_FLAG, DRY_RUN_DESCRIPTION, false)
@@ -1055,19 +1069,26 @@ export function createMessagesCommand(): Command {
 
       try {
         const message = await resolveMessageText(options);
+        const files = await checkDraftFiles(options.file);
         const { client, recipientId, target } = await resolveRecipient(options, spinner);
 
         if (options.dryRun) {
           client.requireBrowserAuth(DRAFT_CREATE_AUTH_MESSAGE);
           spinner.stop();
+          const payload = files.length
+            ? { text: message, files: files.map((file) => ({ file: file.path, file_size: file.size })) }
+            : { text: message };
           emitDryRun(
-            await buildPreview(client, 'create draft', recipientTarget(recipientId, target.threadTs), { text: message }, { lookupName: true }),
+            await buildPreview(client, 'create draft', recipientTarget(recipientId, target.threadTs), payload, { lookupName: true }),
             options.json,
           );
           return;
         }
 
         const channelId = await openRecipient(client, recipientId, spinner);
+        const fileIds = await uploadDraftFiles(client, options.file, {
+          onProgress: (progress) => { spinner.text = progress; },
+        });
 
         let response;
         let replaced = false;
@@ -1076,7 +1097,7 @@ export function createMessagesCommand(): Command {
           : undefined;
         if (existing) {
           spinner.text = 'Replacing the existing draft...';
-          response = await client.updateDraft(existing, message);
+          response = await client.updateDraft(existing, message, fileIds.length ? { file_ids: fileIds } : {});
           // drafts.update answers with the updated draft; keep the id we sent
           // if a future Slack response omits it.
           response = { ...response, draft: { ...(response.draft ?? {}), id: response.draft?.id ?? existing.id } };
@@ -1085,6 +1106,7 @@ export function createMessagesCommand(): Command {
           spinner.text = 'Creating draft...';
           response = await client.createDraft(channelId, message, {
             thread_ts: target.threadTs,
+            file_ids: fileIds,
           });
         }
 
@@ -1097,6 +1119,7 @@ export function createMessagesCommand(): Command {
             draft_id: response.draft.id,
             ...(replaced ? { replaced: true } : {}),
             ...(target.threadTs ? { thread_ts: target.threadTs } : {}),
+            ...(fileIds.length ? { file_ids: fileIds } : {}),
           });
         } else {
           success(`Draft ID: ${response.draft.id}`);
@@ -1113,6 +1136,7 @@ export function createMessagesCommand(): Command {
       new Option('--message-file <path>', 'Read the new message text from a UTF-8 file, or stdin with -')
         .conflicts('message')
     )
+    .option('--file <path>', `Replace the draft's files with this local file (repeat for several, up to ${MAX_DRAFT_FILES})`, collectDraftFile, [] as string[])
     .option('--workspace <id|name>', 'Workspace to use')
     .option('--json', 'Output the updated draft as JSON', false)
     .option(DRY_RUN_FLAG, DRY_RUN_DESCRIPTION, false)
@@ -1121,6 +1145,7 @@ export function createMessagesCommand(): Command {
 
       try {
         const message = await resolveMessageText(options);
+        const files = await checkDraftFiles(options.file);
         const client = await getAuthenticatedClient(options.workspace);
         const draft = findDraftById(await fetchActiveRawDrafts(client), options.draftId);
         if (!draft) {
@@ -1131,17 +1156,23 @@ export function createMessagesCommand(): Command {
         if (options.dryRun) {
           client.requireBrowserAuth(DRAFT_CREATE_AUTH_MESSAGE);
           spinner.stop();
+          const payload = files.length
+            ? { text: message, files: files.map((file) => ({ file: file.path, file_size: file.size })) }
+            : { text: message };
           emitDryRun(
-            await buildPreview(client, 'update draft', { kind: 'draft', id: draft.id }, { text: message }),
+            await buildPreview(client, 'update draft', { kind: 'draft', id: draft.id }, payload),
             options.json,
           );
           return;
         }
 
-        await client.updateDraft(draft, message);
+        const fileIds = await uploadDraftFiles(client, options.file, {
+          onProgress: (progress) => { spinner.text = progress; },
+        });
+        await client.updateDraft(draft, message, fileIds.length ? { file_ids: fileIds } : {});
         spinner.succeed('Draft updated successfully!');
         if (options.json) {
-          writeJson({ draft_id: draft.id, channel_id: channelId });
+          writeJson({ draft_id: draft.id, channel_id: channelId, ...(fileIds.length ? { file_ids: fileIds } : {}) });
         } else {
           success(`Draft ID: ${draft.id}`);
         }

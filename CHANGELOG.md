@@ -8,7 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Update a draft and overwrite one with `--replace`**: `messages update-draft --draft-id <id> --message <text>` (or `--message-file`) replaces the text of an unsent draft in place and keeps its channel or thread, and `messages draft --replace` overwrites the draft already in that channel or thread instead of failing with `attached_draft_exists`. Browser session tokens only; `update-draft` takes `--json` and `--dry-run`
+- **Update a draft and overwrite one with `--replace`**: `messages update-draft --draft-id <id> --message <text>` (or `--message-file`) replaces the text of an unsent draft in place and keeps its channel or thread, and `messages draft --replace` overwrites the draft already in that channel or thread instead of failing with `attached_draft_exists`. Browser session tokens only; `update-draft` takes `--json` (`{ draft_id, channel_id }`) and `--dry-run`
+- **Files on a draft with `--file`**: `messages draft --recipient-id C0123456789 --message "Before and after" --file ./before.png --file ./after.png` attaches local files to an unsent draft, so a screenshot rides with the text and a human sends it from Slack
+  - Repeatable, up to 10 files (Slack's limit for one message); each is uploaded first, in the order given, and the file ids go on the draft (`file_ids` in the `--json` output)
+  - The upload is private: it is completed without a channel, so nothing is shared until the draft is sent. Missing, empty or non-regular paths, a repeated path and more than 10 files are refused before any upload; `--dry-run` runs the same checks and reports each file's name and size
+  - `update-draft --file` and `draft --replace --file` replace the draft's files; without `--file` the draft now keeps the files it has, where an update used to clear them. `send-draft` still refuses a draft that carries files
 
 ## [0.19.0] - 2026-11-01
 
