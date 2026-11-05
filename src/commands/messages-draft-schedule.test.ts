@@ -118,6 +118,18 @@ describe('messages draft scheduling, in process', () => {
     expect(create.args[1]).toBe('Heads-up <@U0123456789>');
   });
 
+  it('accepts "tomorrow 9am" directly', async () => {
+    const calls: Call[] = [];
+    const tomorrow = futureLocal(1, 9);
+
+    await run(recordingClient(calls), [
+      'draft', '--recipient-id', 'C0123456789', '--message', 'Standup', '--at', 'tomorrow 9am',
+    ]);
+
+    const create = calls.find((call) => call.method === 'createDraft')!;
+    expect((create.args[2] as { date_scheduled: number }).date_scheduled).toBe(tomorrow.timestamp);
+  });
+
   it('turns --in into a send time relative to now', async () => {
     const calls: Call[] = [];
     const before = Math.floor(Date.now() / 1000) + 7200;
@@ -136,7 +148,7 @@ describe('messages draft scheduling, in process', () => {
   it.each([
     ['both --at and --in', ['--at', futureLocal().text, '--in', '2h']],
     ['a past time', ['--at', '2020-01-01 09:00']],
-    ['an unreadable time', ['--at', 'tomorrow 9am']],
+    ['an unreadable time', ['--at', 'next monday 9am']],
   ])('refuses %s before any Slack call', async (_label, scheduleArgs) => {
     const calls: Call[] = [];
 
@@ -221,6 +233,68 @@ describe('messages draft scheduling, in process', () => {
       draft_id: 'DrOld',
       channel_id: 'C0123456789',
       date_scheduled: 1893456000,
+    });
+  });
+
+  it('reschedules a draft with update-draft --at', async () => {
+    const calls: Call[] = [];
+    const existing = {
+      id: 'DrOld',
+      last_updated_ts: '1791356033.208141',
+      destinations: [{ channel_id: 'C0123456789' }],
+      file_ids: [],
+      date_scheduled: 1893456000,
+    };
+    const when = futureLocal();
+
+    await run(recordingClient(calls, {
+      listDrafts: async () => ({ ok: true, drafts: [existing], has_more: false }),
+    }), [
+      'update-draft', '--draft-id', 'DrOld', '--message', 'New text', '--at', when.text,
+    ]);
+
+    const update = calls.find((call) => call.method === 'updateDraft')!;
+    expect(update.args[2]).toEqual({ date_scheduled: when.timestamp });
+    expect(json()).toEqual({
+      draft_id: 'DrOld',
+      channel_id: 'C0123456789',
+      date_scheduled: when.timestamp,
+    });
+  });
+
+  it('refuses a past update-draft time before reading the draft', async () => {
+    const calls: Call[] = [];
+
+    await run(recordingClient(calls), [
+      'update-draft', '--draft-id', 'DrOld', '--message', 'New text', '--at', '2020-01-01 09:00',
+    ]);
+
+    expect(process.exitCode).toBe(1);
+    expect(lastError().code).toBe('invalid_input');
+    expect(calls).toEqual([]);
+  });
+
+  it('previews an update-draft send time without writing', async () => {
+    const calls: Call[] = [];
+    const existing = {
+      id: 'DrOld',
+      last_updated_ts: '1791356033.208141',
+      destinations: [{ channel_id: 'C0123456789' }],
+      file_ids: [],
+    };
+    const when = futureLocal();
+
+    await run(recordingClient(calls, {
+      listDrafts: async () => ({ ok: true, drafts: [existing], has_more: false }),
+    }), [
+      'update-draft', '--draft-id', 'DrOld', '--message', 'New text', '--at', when.text, '--dry-run',
+    ]);
+
+    expect(calls.map((call) => call.method)).not.toContain('updateDraft');
+    expect(json()).toMatchObject({
+      dry_run: true,
+      action: 'update draft',
+      payload: { text: 'New text', date_scheduled: when.timestamp },
     });
   });
 

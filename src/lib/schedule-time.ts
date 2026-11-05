@@ -18,7 +18,7 @@ const UNIT_SECONDS: Readonly<Record<string, number>> = { d: SECONDS_PER_DAY, h: 
 
 const AT_FORMATS =
   'Use Unix seconds (1791791400), ISO 8601 with an offset (2026-10-12T09:50:00+02:00 or ...Z), ' +
-  'or a local date and time ("2026-10-12 09:50").';
+  'a local date and time ("2026-10-12 09:50"), or a relative day and time ("tomorrow 9am", "today 18:30").';
 const IN_FORMATS = 'Use minutes, hours and days, each at most once: 45m, 2h, 3d, 1h30m.';
 
 const UNIX_SECONDS = /^\d{1,12}$/;
@@ -33,6 +33,12 @@ const ZONE = /(Z|[+-]\d{2}:?\d{2})/;
 const DATE_TIME = new RegExp(`^${DATE.source}[T ]${TIME.source}${ZONE.source}?$`);
 const DURATION = /^(?:\d+[dhm])+$/;
 const DURATION_PART = /(\d+)([dhm])/g;
+
+// Relative days are read in the machine's timezone, with a clock time spelled
+// either as "9am" / "9:30pm" or as "09:30" / "09:30:15".
+const RELATIVE_DAY = /^(today|tomorrow)(?:\s+(?:at\s+)?(.+))?$/i;
+const CLOCK_24 = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+const CLOCK_12 = /^(\d{1,2})(?::(\d{2}))?\s*([ap]m)$/i;
 
 /** The date and time fields of an `--at` value, as written (month is 1-12). */
 interface WallClock {
@@ -69,7 +75,9 @@ export function parseScheduleTime(input: ScheduleTimeInput, nowMs: number = Date
   }
 
   const nowSeconds = Math.floor(nowMs / 1000);
-  const postAt = hasAt ? parseAt(input.at as string) : nowSeconds + parseDuration(input.in as string);
+  const postAt = hasAt
+    ? parseAt(input.at as string, '--at', nowMs)
+    : nowSeconds + parseDuration(input.in as string);
 
   if (postAt <= nowSeconds) {
     throw new InvalidInputError(
@@ -103,20 +111,82 @@ export function parseDueTime(raw: string): number {
 }
 
 // `flag` names the option in the error messages.
-function parseAt(raw: string, flag = '--at'): number {
+function parseAt(raw: string, flag = '--at', nowMs: number = Date.now()): number {
   const value = raw.trim();
   if (UNIX_SECONDS.test(value)) return Number(value);
 
-  const match = DATE_TIME.exec(value);
-  if (!match) {
-    throw new InvalidInputError(`Cannot read ${flag} "${raw}" as a time. ${AT_FORMATS}`);
+  const relative = RELATIVE_DAY.exec(value);
+  if (relative) {
+    const dayOffset = relative[1].toLowerCase() === 'tomorrow' ? 1 : 0;
+    const clock = parseDayClock(relative[2], raw, flag);
+    return Math.floor(relativeTime(nowMs, dayOffset, clock, raw, flag) / 1000);
   }
+
+  const match = DATE_TIME.exec(value);
+  if (!match) throw cannotReadTime(raw, flag);
   const [year, month, day, hour, minute] = match.slice(1, 6).map(Number);
   const fields: WallClock = { year, month, day, hour, minute, second: Number(match[6] ?? 0) };
   const zone = match[7];
 
   const ms = zone === undefined ? localTime(raw, flag, fields) : zonedTime(raw, flag, zone, fields);
   return Math.floor(ms / 1000);
+}
+
+interface ClockTime {
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+function cannotReadTime(raw: string, flag: string): InvalidInputError {
+  return new InvalidInputError(`Cannot read ${flag} "${raw}" as a time. ${AT_FORMATS}`);
+}
+
+// The clock part of "today"/"tomorrow …": 12-hour with am/pm, or 24-hour with
+// a colon. A bare "9" is refused because it is not clear which one is meant.
+function parseDayClock(text: string | undefined, raw: string, flag: string): ClockTime {
+  const value = text?.trim() ?? '';
+
+  const twelve = CLOCK_12.exec(value);
+  if (twelve) {
+    let hour = Number(twelve[1]);
+    const minute = Number(twelve[2] ?? 0);
+    if (hour < 1 || hour > 12) throw notARealTime(raw, flag);
+    if (hour === 12) hour = 0;
+    if (twelve[3].toLowerCase() === 'pm') hour += 12;
+    return { hour, minute, second: 0 };
+  }
+
+  const twentyFour = CLOCK_24.exec(value);
+  if (!twentyFour) throw cannotReadTime(raw, flag);
+  return {
+    hour: Number(twentyFour[1]),
+    minute: Number(twentyFour[2]),
+    second: Number(twentyFour[3] ?? 0),
+  };
+}
+
+// The local instant of today or tomorrow at a clock time. Moving `now` to noon
+// first keeps a DST change at midnight from shifting the date arithmetic. The
+// wall clock is read back so an impossible time, including one skipped when the
+// clocks go forward, is refused rather than silently rolled over.
+function relativeTime(nowMs: number, dayOffset: number, clock: ClockTime, raw: string, flag: string): number {
+  const target = new Date(nowMs);
+  target.setHours(12, 0, 0, 0);
+  target.setDate(target.getDate() + dayOffset);
+
+  const year = target.getFullYear();
+  const month = target.getMonth();
+  const day = target.getDate();
+  const local = new Date(year, month, day, clock.hour, clock.minute, clock.second);
+  const real = local.getFullYear() === year
+    && local.getMonth() === month
+    && local.getDate() === day
+    && local.getHours() === clock.hour
+    && local.getMinutes() === clock.minute
+    && local.getSeconds() === clock.second;
+  if (!real) throw notARealTime(raw, flag);
+  return local.getTime();
 }
 
 // A time with an explicit `Z` or offset. The fields are checked by building

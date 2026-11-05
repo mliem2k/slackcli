@@ -190,7 +190,9 @@ describe('messages command', () => {
   it('exposes update-draft by draft id, with the draft id mandatory', () => {
     expect(subcommand('update-draft')).toBeDefined();
     expect(mandatoryOptions('update-draft')).toEqual(['--draft-id']);
-    expect(longOptions('update-draft')).toEqual(expect.arrayContaining(['--message', '--message-file']));
+    expect(longOptions('update-draft')).toEqual(expect.arrayContaining([
+      '--message', '--message-file', '--at', '--in',
+    ]));
   });
 
   it('exposes list-drafts as a browser-only read command with limit, workspace, JSON and fields options', () => {
