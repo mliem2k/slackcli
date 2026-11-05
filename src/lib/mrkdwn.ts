@@ -27,6 +27,8 @@ interface RichTextList {
   type: 'rich_text_list';
   style: 'bullet' | 'ordered';
   indent: number;
+  /** Items already numbered at this level, so "2." after a nested list stays "2.". */
+  offset?: number;
   elements: RichTextSection[];
 }
 
@@ -247,9 +249,10 @@ export function parseMrkdwn(text: string): RichTextBlock[] {
   // A fenced code block can hold list-looking lines; never turn those into a list.
   let inFence = false;
   const kinds = lines.map((line) => {
-    if (/^\s*```/.test(line)) {
-      const count = (line.match(/```/g) ?? []).length;
-      if (count % 2 === 1) inFence = !inFence;
+    const fences = (line.match(/```/g) ?? []).length;
+    if (fences > 0) {
+      // A line that opens or closes a fence (anywhere on it) is never a list item.
+      if (fences % 2 === 1) inFence = !inFence;
       return null;
     }
     return inFence ? null : listLine(line);
@@ -260,6 +263,8 @@ export function parseMrkdwn(text: string): RichTextBlock[] {
   }
 
   const elements: Array<RichTextSection | RichTextList> = [];
+  // Ordered items already emitted per indent level in the current run of list lines.
+  const numbered = new Map<number, number>();
   let prose: string[] = [];
   const flushProse = () => {
     if (prose.length === 0) return;
@@ -267,6 +272,7 @@ export function parseMrkdwn(text: string): RichTextBlock[] {
     const body = prose.join('\n').replace(/\n$/, '');
     if (body.length > 0 || elements.length === 0) elements.push(section(body));
     prose = [];
+    numbered.clear();
   };
 
   lines.forEach((line, index) => {
@@ -278,12 +284,19 @@ export function parseMrkdwn(text: string): RichTextBlock[] {
       return;
     }
     flushProse();
+    // Going back up a level restarts the numbering of every deeper level.
+    for (const level of numbered.keys()) if (level > item.indent) numbered.delete(level);
     const last = elements.at(-1);
     if (last?.type === 'rich_text_list' && last.style === item.style && last.indent === item.indent) {
       last.elements.push(section(item.text));
     } else {
-      elements.push({ type: 'rich_text_list', style: item.style, indent: item.indent, elements: [section(item.text)] });
+      const list: RichTextList = { type: 'rich_text_list', style: item.style, indent: item.indent, elements: [section(item.text)] };
+      const before = item.style === 'ordered' ? numbered.get(item.indent) ?? 0 : 0;
+      if (before > 0) list.offset = before;
+      elements.push(list);
     }
+    if (item.style === 'ordered') numbered.set(item.indent, (numbered.get(item.indent) ?? 0) + 1);
+    else numbered.delete(item.indent);
   });
   flushProse();
 
