@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Rich-text lists in drafts**: `messages draft` renders lines starting with `• `, `- `, `1. ` or `1) ` as Slack `rich_text_list` blocks, with two spaces or a tab per nesting level, instead of literal bullet characters. Prose stays in its own sections, inline formatting and mentions work inside items, and lines inside a fenced code block are left alone
+
 ## [0.19.0] - 2026-11-01
 
 ### Removed

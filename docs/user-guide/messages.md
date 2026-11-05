@@ -408,7 +408,9 @@ The text is converted from Slack mrkdwn into `rich_text` blocks so the draft
 opens in the composer already formatted. User, user group, channel and
 broadcast tokens (`<@U…>`, `<!subteam^S…>`, `<#C…>`, `<!here>`) and links
 (`<https://…|label>`) become real mentions and links; any other `<…>` text stays
-literal. `--message-file` works here exactly as
+literal. Lines that start with `• `, `- `, `1. ` or `1) ` become real Slack
+lists, with two spaces or a tab per nesting level; lines inside a fenced code
+block stay literal. `--message-file` works here exactly as
 it does on `messages send`, including `-` for standard input.
 
 `--json` prints the draft's identity. A draft is unsent, so it has no message

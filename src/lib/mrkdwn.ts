@@ -23,9 +23,16 @@ interface RichTextSection {
   elements: RichTextElement[];
 }
 
+interface RichTextList {
+  type: 'rich_text_list';
+  style: 'bullet' | 'ordered';
+  indent: number;
+  elements: RichTextSection[];
+}
+
 interface RichTextBlock {
   type: 'rich_text';
-  elements: RichTextSection[];
+  elements: Array<RichTextSection | RichTextList>;
 }
 
 // Markers and their corresponding style keys
@@ -205,17 +212,80 @@ function parseInline(text: string): RichTextElement[] {
   return stripEmptyStyles(elements);
 }
 
+// A list item line: optional indentation, then "•" or "-" (bullet) or
+// "1." / "1)" (ordered), then at least one space. Two spaces or one tab of
+// indentation is one nesting level. "* " is not a bullet: it is too often a bold
+// span that lost its closing star.
+const LIST_LINE = /^([ \t]*)(?:([•\-])|(\d+)[.)])[ \t]+(.*)$/;
+
+interface ListLine {
+  style: 'bullet' | 'ordered';
+  indent: number;
+  text: string;
+}
+
+function listLine(line: string): ListLine | null {
+  const match = LIST_LINE.exec(line);
+  if (!match) return null;
+  const width = match[1].replace(/\t/g, '  ').length;
+  return { style: match[2] ? 'bullet' : 'ordered', indent: Math.min(Math.floor(width / 2), 8), text: match[4] };
+}
+
+function section(text: string): RichTextSection {
+  const elements = parseInline(text);
+  return { type: 'rich_text_section', elements: elements.length > 0 ? elements : [{ type: 'text', text: '' }] };
+}
+
 export function parseMrkdwn(text: string): RichTextBlock[] {
   // Keep newlines embedded in text elements rather than splitting into multiple sections.
   // Slack's draft composer renders multiple rich_text_section elements inline (no line breaks),
   // but correctly preserves \n characters within a single text element.
-  const elements = parseInline(text);
+  // Lines that start with "• ", "- " or "1. " become rich_text_list blocks, the
+  // structure Slack's own composer writes for a list, so they render as a real list
+  // (hanging indent, numbering) instead of literal bullet characters.
+  const lines = text.split('\n');
+  // A fenced code block can hold list-looking lines; never turn those into a list.
+  let inFence = false;
+  const kinds = lines.map((line) => {
+    if (/^\s*```/.test(line)) {
+      const count = (line.match(/```/g) ?? []).length;
+      if (count % 2 === 1) inFence = !inFence;
+      return null;
+    }
+    return inFence ? null : listLine(line);
+  });
 
-  return [{
-    type: 'rich_text',
-    elements: [{
-      type: 'rich_text_section',
-      elements: elements.length > 0 ? elements : [{ type: 'text', text: '' }],
-    }],
-  }];
+  if (kinds.every((kind) => kind === null)) {
+    return [{ type: 'rich_text', elements: [section(text)] }];
+  }
+
+  const elements: Array<RichTextSection | RichTextList> = [];
+  let prose: string[] = [];
+  const flushProse = () => {
+    if (prose.length === 0) return;
+    // The line break before a list belongs to the list, as in Slack's composer.
+    const body = prose.join('\n').replace(/\n$/, '');
+    if (body.length > 0 || elements.length === 0) elements.push(section(body));
+    prose = [];
+  };
+
+  lines.forEach((line, index) => {
+    const item = kinds[index];
+    if (!item) {
+      // A blank line right after a list is the list's own spacing, not text.
+      if (prose.length === 0 && elements.at(-1)?.type === 'rich_text_list' && line === '') return;
+      prose.push(line);
+      return;
+    }
+    flushProse();
+    const last = elements.at(-1);
+    if (last?.type === 'rich_text_list' && last.style === item.style && last.indent === item.indent) {
+      last.elements.push(section(item.text));
+    } else {
+      elements.push({ type: 'rich_text_list', style: item.style, indent: item.indent, elements: [section(item.text)] });
+    }
+  });
+  flushProse();
+
+  return [{ type: 'rich_text', elements }];
 }
