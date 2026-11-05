@@ -168,7 +168,9 @@ slackcli messages send --permalink="$LINK" --message="On it 👀"
 | Upload a file with a message | `slackcli messages send --file=./report.pdf …` | [messages](docs/user-guide/messages.md) |
 | Post rich Block Kit content | `slackcli messages send --blocks=@blocks.json …` | [messages](docs/user-guide/messages.md) |
 | Review active drafts | `slackcli messages list-drafts` | [messages](docs/user-guide/messages.md) |
+| Mention someone by handle | `slackcli messages draft --message="Heads-up @alice" …` | [messages](docs/user-guide/messages.md#mentions-handle) |
 | Post a message later | `slackcli messages schedule --in=2h …` | [messages](docs/user-guide/messages.md#messages-schedule) |
+| Schedule a draft to send | `slackcli messages draft --at="2026-11-06 09:00" …` | [messages](docs/user-guide/messages.md#scheduling-a-draft---at---in) |
 | Script it / feed an AI agent | `… --json \| jq` | [scripting & JSON](docs/user-guide/scripting.md) |
 | Juggle several workspaces | `slackcli conversations list --workspace=automation-bot` | [workspaces](docs/user-guide/workspaces.md) |
 | Fix something that broke | `slackcli auth whoami` | [troubleshooting](docs/user-guide/troubleshooting.md) |
@@ -229,10 +231,10 @@ flowchart LR
 | **Parse a DevTools cURL** | `slackcli auth parse-curl --login` | Locked-down browsers, or when you already copied the request. |
 | **Browser tokens by hand** | `slackcli auth login-browser --xoxd=… --xoxc=… --workspace-url=…` | Full control, or scripted provisioning. |
 
-Browser session tokens can create, list, send, and delete **drafts**, which a Slack app simply cannot do, and
-they back `saved list` and `conversations unread` with Slack's own native endpoints
-rather than approximations. Slack app tokens are more stable and survive a browser logout, and
-only they can **schedule** a message for later.
+Browser session tokens can create, list, schedule, send, and delete **drafts**, which a Slack app
+simply cannot do, and they back `saved list` and `conversations unread` with Slack's own native
+endpoints rather than approximations. Slack app tokens are more stable and survive a browser
+logout, and only they can **schedule** a message for later with `messages schedule`.
 
 `slackcli auth extract-tokens` prints the manual walkthrough.
 The security model, the OAuth scopes each command needs, and what `login-auto` does with
@@ -333,6 +335,7 @@ slackcli messages delete-draft Dr456 --yes                    # discard draft
 slackcli messages draft --recipient-id=C123 --message-file=./v2.md --replace   # overwrite the draft already there
 slackcli messages update-draft --draft-id=Dr123 --message="New text"
 slackcli messages draft --recipient-id=C123 --message="Before and after" --file=./before.png --file=./after.png   # attach files (up to 10)
+slackcli messages draft --recipient-id=C123 --message="Heads-up @alice" --at="2026-11-06 09:00"   # real mention, scheduled
 slackcli messages schedule --recipient-id=C123 --message="Standup in 10" --at="2026-10-12 09:50"
 slackcli messages schedule --recipient-id=C123 --message="Window closed" --in=2h --json
 slackcli messages list-scheduled --json
