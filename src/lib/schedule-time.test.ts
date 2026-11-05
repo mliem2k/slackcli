@@ -98,6 +98,56 @@ describe('parseScheduleTime --at', () => {
     expect(at(value)).toBe(expectedMs / 1000);
   });
 
+  it.each([
+    ['tomorrow 9am', Date.UTC(2026, 9, 11, 9, 0, 0)],
+    ['TOMORROW 9AM', Date.UTC(2026, 9, 11, 9, 0, 0)],
+    ['tomorrow 09:00', Date.UTC(2026, 9, 11, 9, 0, 0)],
+    ['tomorrow at 9am', Date.UTC(2026, 9, 11, 9, 0, 0)],
+    ['tomorrow 9:30pm', Date.UTC(2026, 9, 11, 21, 30, 0)],
+    ['tomorrow 12am', Date.UTC(2026, 9, 11, 0, 0, 0)],
+    ['tomorrow 12pm', Date.UTC(2026, 9, 11, 12, 0, 0)],
+    ['tomorrow 09:30:15', Date.UTC(2026, 9, 11, 9, 30, 15)],
+    ['today 18:30', Date.UTC(2026, 9, 10, 18, 30, 0)],
+  ])('reads the relative time %p', (value, expectedMs) => {
+    expect(at(value)).toBe(expectedMs / 1000);
+  });
+
+  it('reads a relative time in the machine timezone', () => {
+    setTimezone('Europe/Berlin');
+    // 12:00 UTC is 14:00 in Berlin, so tomorrow 09:00 is 07:00 UTC.
+    expect(at('tomorrow 9am')).toBe(Date.UTC(2026, 9, 11, 7, 0, 0) / 1000);
+  });
+
+  it('rolls a relative day over a month boundary', () => {
+    const now = Date.UTC(2026, 0, 31, 12, 0, 0);
+    expect(at('tomorrow 9am', now)).toBe(Date.UTC(2026, 1, 1, 9, 0, 0) / 1000);
+  });
+
+  it('refuses a relative time skipped when the clocks go forward', () => {
+    setTimezone('Europe/Berlin');
+    // 29 March 2026: 02:00 jumps to 03:00 in Berlin, so tomorrow 02:30 does not exist.
+    const now = Date.UTC(2026, 2, 28, 12, 0, 0);
+    expect(refusal(() => at('tomorrow 2:30am', now))).toContain('not a real date and time');
+    expect(at('tomorrow 3am', now)).toBe(Date.UTC(2026, 2, 29, 1, 0, 0) / 1000);
+  });
+
+  it.each([
+    ['tomorrow', 'Cannot read'],
+    ['today', 'Cannot read'],
+    ['tomorrow 9', 'Cannot read'],
+    ['tomorrow 9:60am', 'not a real date and time'],
+    ['tomorrow 13pm', 'not a real date and time'],
+    ['tomorrow 0am', 'not a real date and time'],
+    ['tomorrow 25:00', 'not a real date and time'],
+    ['tomorrow 9:00:60', 'not a real date and time'],
+  ])('refuses the incomplete or impossible relative time %p', (value, message) => {
+    expect(refusal(() => at(value))).toContain(message);
+  });
+
+  it('refuses a relative time that is already past', () => {
+    expect(refusal(() => at('today 09:00'))).toContain('must be in the future');
+  });
+
   it('refuses a local time skipped when the clocks go forward', () => {
     setTimezone('Europe/Berlin');
     // 29 March 2026: 02:00 jumps to 03:00 in Berlin.
@@ -203,7 +253,7 @@ describe('parseScheduleTime --at', () => {
     expect(refusal(() => at(value))).toBe(
       `Cannot read --at "${value}" as a time. Use Unix seconds (1791791400), ` +
         'ISO 8601 with an offset (2026-10-12T09:50:00+02:00 or ...Z), ' +
-        'or a local date and time ("2026-10-12 09:50").',
+        'a local date and time ("2026-10-12 09:50"), or a relative day and time ("tomorrow 9am", "today 18:30").',
     );
   });
 
@@ -324,6 +374,14 @@ describe('parseDueTime', () => {
     expect(parseDueTime('2026-10-12T09:50:00+02:00')).toBe(Date.UTC(2026, 9, 12, 7, 50, 0) / 1000);
   });
 
+  it('reads a relative day and time', () => {
+    const tomorrow = new Date();
+    tomorrow.setHours(12, 0, 0, 0);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const expected = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 9, 0, 0);
+    expect(parseDueTime('tomorrow 9am')).toBe(Math.floor(expected.getTime() / 1000));
+  });
+
   it('has no future check and no 120-day cap', () => {
     expect(parseDueTime('2020-01-01T00:00:00Z')).toBe(Date.UTC(2020, 0, 1) / 1000);
     expect(parseDueTime('2099-10-10T12:00:00Z')).toBe(Date.UTC(2099, 9, 10, 12, 0, 0) / 1000);
@@ -333,7 +391,7 @@ describe('parseDueTime', () => {
     expect(refusal(() => parseDueTime('tomorrow'))).toBe(
       'Cannot read --due "tomorrow" as a time. Use Unix seconds (1791791400), ' +
         'ISO 8601 with an offset (2026-10-12T09:50:00+02:00 or ...Z), ' +
-        'or a local date and time ("2026-10-12 09:50").',
+        'a local date and time ("2026-10-12 09:50"), or a relative day and time ("tomorrow 9am", "today 18:30").',
     );
     expect(refusal(() => parseDueTime('2026-02-30 09:50'))).toStartWith('--due "2026-02-30 09:50" is not');
   });

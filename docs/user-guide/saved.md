@@ -60,9 +60,10 @@ See [links and timestamps](links-and-timestamps.md).
 Without `--due` the to-do is due now, as in Slack's web client when no date is
 picked. `--due` takes the same formats as `messages schedule --at`: Unix seconds
 (`1791791400`), ISO 8601 with an offset (`2026-10-12T09:50:00+02:00` or `...Z`),
-or a local date and time (`"2026-10-12 09:50"`). Unlike `--at` it may be in the
-past (an overdue to-do) and has no 120-day limit, but must be after the Unix
-epoch: Slack reads `0` as a to-do with no due date.
+a local date and time (`"2026-10-12 09:50"`), or `today`/`tomorrow` and a clock
+time (`"tomorrow 9am"`). Unlike `--at` it may be in the past (an overdue to-do)
+and has no 120-day limit, but must be after the Unix epoch: Slack reads `0` as
+a to-do with no due date.
 
 | Option | Purpose |
 |---|---|

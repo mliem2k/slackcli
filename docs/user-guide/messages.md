@@ -420,21 +420,22 @@ moment rules as [`messages schedule`](#when-to-post---at---in):
 # Tomorrow at 09:00 in this machine's timezone
 slackcli messages draft --recipient-id=C1234567890 \
   --message="Heads-up @alice, the deploy starts at 09:00" \
-  --at "2026-11-06 09:00"
+  --at "tomorrow 9am"
 
 # In two hours, with the result as JSON
 slackcli messages draft --recipient-id=C1234567890 --message="Standup" --in=2h --json
 ```
 
-`--at` takes Unix seconds, ISO 8601 with an offset or `Z`, or a local date and
-time; `--in` takes minutes, hours and days (`45m`, `2h`, `3d`, `1h30m`). The
-time must be in the future and at most 120 days ahead. A scheduled draft is
-sent by Slack itself, so nothing has to stay running. Files can ride on a
-scheduled draft.
+`--at` takes Unix seconds, ISO 8601 with an offset or `Z`, a local date and
+time, or `today`/`tomorrow` and a clock time; `--in` takes minutes, hours and
+days (`45m`, `2h`, `3d`, `1h30m`). The time must be in the future and at most
+120 days ahead. A scheduled draft is sent by Slack itself, so nothing has to
+stay running. Files can ride on a scheduled draft.
 
 `--replace` changes the text and files of an existing draft and keeps its send
-time unless `--at` or `--in` gives a new one. `send-draft` refuses a scheduled
-draft, because Slack sends it without the CLI.
+time unless `--at` or `--in` gives a new one. `messages update-draft --at` or
+`--in` reschedules a draft by id. `send-draft` refuses a scheduled draft,
+because Slack sends it without the CLI.
 
 The draft is created first and its send time is set with a second Slack call,
 as the Slack web client does; if setting the time fails, the new draft is
@@ -549,6 +550,9 @@ script that scheduled it can exit and the machine can be off.
 # At a local date and time (this machine's timezone)
 slackcli messages schedule --recipient-id C0123456789 --message "Standup in 10 minutes" --at "2026-10-12 09:50"
 
+# Tomorrow at 09:00, in this machine's timezone
+slackcli messages schedule --recipient-id C0123456789 --message "Heads-up @alice" --at "tomorrow 9am"
+
 # After a delay
 slackcli messages schedule --recipient-id="#general" --message "Deploy window closed" --in 2h
 
@@ -583,13 +587,14 @@ Exactly one of the two is required.
 | `--at` | Unix seconds | `--at 1791791400` |
 | `--at` | ISO 8601 with an offset or `Z` | `--at 2026-10-12T09:50:00+02:00`, `--at 2026-10-12T07:50:00Z` |
 | `--at` | A local date and time, read in this machine's timezone (`T` or a space; seconds optional) | `--at "2026-10-12 09:50"` |
+| `--at` | `today` or `tomorrow` and a clock time (`9am`, `9:30pm`, `09:30`, `09:30:15`), in this machine's timezone | `--at "tomorrow 9am"`, `--at "today 18:30"` |
 | `--in` | Minutes, hours and days, each at most once | `--in 45m`, `--in 2h`, `--in 3d`, `--in 1h30m` |
 
-Nothing else is guessed at: a date without a time, `tomorrow`, or `9am` is
-refused with `invalid_input`, and so is a date that does not exist
-(`2026-02-30`). The resolved time is always echoed with its timezone, and
-`post_at` in the JSON output is the same instant in Unix seconds, so a local
-time can be checked before it matters.
+Nothing else is guessed at: a relative day without a time (`tomorrow`), a bare
+time (`9am`), or a date without a time is refused with `invalid_input`, and so
+is a date that does not exist (`2026-02-30`). The resolved time is always
+echoed with its timezone, and `post_at` in the JSON output is the same instant
+in Unix seconds, so a local time can be checked before it matters.
 
 Around a clock change a local time can be ambiguous. One that is skipped when
 the clocks go forward (02:30 on that night) is refused; one that happens twice
@@ -701,14 +706,16 @@ slackcli messages update-draft --draft-id=Dr0123456789 --message="New text"
 slackcli messages update-draft --draft-id=Dr0123456789 --message="New text" --file=./after.png
 
 # Move the existing draft's send time
-slackcli messages draft --recipient-id=C1234567890 --message-file=./v2.md --replace --at="2026-11-06 09:00"
+slackcli messages draft --recipient-id=C1234567890 --message-file=./v2.md --replace --at="tomorrow 9am"
+slackcli messages update-draft --draft-id=Dr0123456789 --message="New text" --at="tomorrow 9am"
 ```
 
 `--replace` matches the destination exactly: a channel draft is only replaced by a channel
 draft, and a thread draft only by a draft for the same `--thread-ts`. It keeps the existing
 draft's send time unless `--at` or `--in` gives a new one. `update-draft` looks the draft up
 first and fails with a clear error when no active draft has that id (it may have been sent
-or deleted), and it keeps a scheduled draft's send time. Both take `--dry-run`. `--json`
+or deleted), and it keeps a scheduled draft's send time unless `--at` or `--in` changes it.
+Both take `--dry-run`. `--json`
 prints `{draft_id, channel_id}` (plus `file_ids` with `--file`, and `date_scheduled` when
 the draft has a send time) for an update and adds `"replaced": true` to the `draft` output
 when an existing draft was overwritten.
