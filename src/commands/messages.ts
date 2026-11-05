@@ -277,8 +277,10 @@ const HELP = {
       'Exactly one of --at or --in may be given to schedule the draft. ' + SCHEDULE_TIME_NOTE,
       'A scheduled draft is sent by Slack at that time, like "messages schedule". It keeps its files, ' +
         'and --replace keeps an existing send time unless --at or --in changes it.',
-      'Slack keeps one unsent draft per channel or thread, so a second draft there fails with ' +
-        'attached_draft_exists. --replace overwrites the existing draft in place instead.',
+      'Slack keeps one unscheduled draft per channel or thread, so another unscheduled draft there fails with ' +
+        'attached_draft_exists. A scheduled draft does not count: schedule the first one with "update-draft --at" ' +
+        'and a new draft can be created beside it. --replace overwrites the unscheduled draft in place ' +
+        '(or the only scheduled one when there is no unscheduled draft).',
       'Creates the draft immediately, with no confirmation prompt.',
     ],
     dryRun: true,
@@ -497,6 +499,18 @@ export async function permalinkField(
 
 // The dry-run target of a send or draft: a user ID is previewed as a DM to that
 // user, because a dry run does not open the DM (conversations.open).
+// Slack answers a second unscheduled draft in one channel or thread with a bare attached_draft_exists. The hint says
+// what frees the slot, because the message alone does not tell that a scheduled draft would.
+export function draftSlotHint(err: unknown): string | undefined {
+  const message = String((err as { message?: unknown } | null)?.message ?? '');
+  if (!message.includes('attached_draft_exists')) {
+    return undefined;
+  }
+  return 'This channel or thread already has an unscheduled draft (see "messages list-drafts"). ' +
+    'Schedule it with "messages update-draft --draft-id <id> --at <time>" to free the slot, ' +
+    'overwrite it with --replace, or send it first.';
+}
+
 function recipientTarget(channelId: string, threadTs: string | undefined): DryRunTarget {
   return { kind: channelId.startsWith('U') ? 'user' : 'channel', id: channelId, thread_ts: threadTs };
 }
@@ -1119,7 +1133,7 @@ export function createMessagesCommand(): Command {
     .option('--permalink <url>', 'Slack message link; drafts a reply in that message\'s thread (replaces --recipient-id and --thread-ts)')
     .option('--at <time>', 'Schedule the draft to send at: Unix seconds, ISO 8601, a local "YYYY-MM-DD HH:MM", or "tomorrow 9am"')
     .option('--in <duration>', 'Schedule the draft to send after this delay: 45m, 2h, 3d, 1h30m')
-    .option('--replace', 'Overwrite the unsent draft already in this channel or thread instead of failing with attached_draft_exists', false)
+    .option('--replace', 'Overwrite the unscheduled draft already in this channel or thread (else the only scheduled one) instead of failing with attached_draft_exists', false)
     .option('--file <path>', `Attach a local file to the draft (repeat for several, up to ${MAX_DRAFT_FILES})`, collectDraftFile, [] as string[])
     .option('--workspace <id|name>', 'Workspace to use')
     .option('--json', 'Output the created draft as JSON', false)
@@ -1208,7 +1222,7 @@ export function createMessagesCommand(): Command {
           success(`Draft ID: ${response.draft.id}`);
         }
       } catch (err: any) {
-        failCommand(err, { json: options.json, spinner, context: 'Failed to create draft' });
+        failCommand(err, { json: options.json, spinner, context: 'Failed to create draft', hint: draftSlotHint(err) });
       }
     });
 

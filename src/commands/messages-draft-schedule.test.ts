@@ -211,6 +211,72 @@ describe('messages draft scheduling, in process', () => {
     expect(json().date_scheduled).toBe(1893456000);
   });
 
+  it('--replace overwrites the unscheduled draft, never a scheduled one beside it, even when that was updated later', async () => {
+    const calls: Call[] = [];
+    const unscheduled = {
+      id: 'DrComposer',
+      last_updated_ts: '1791356033.000000',
+      destinations: [{ channel_id: 'C0123456789' }],
+      file_ids: [],
+      date_scheduled: 0,
+    };
+    const scheduled = {
+      id: 'DrScheduled',
+      last_updated_ts: '1791356099.000000',
+      destinations: [{ channel_id: 'C0123456789' }],
+      file_ids: [],
+      date_scheduled: 4102444800,
+    };
+
+    await run(recordingClient(calls, {
+      listDrafts: async () => ({ ok: true, drafts: [scheduled, unscheduled], has_more: false }),
+    }), ['draft', '--recipient-id', 'C0123456789', '--message', 'New text', '--replace']);
+
+    const update = calls.find((call) => call.method === 'updateDraft')!;
+    expect((update.args[0] as { id: string }).id).toBe('DrComposer');
+    expect(json()).toEqual({ channel_id: 'C0123456789', draft_id: 'DrComposer', replaced: true });
+  });
+
+  it('creates a new draft without --replace and leaves the scheduled draft in the channel alone', async () => {
+    const calls: Call[] = [];
+
+    await run(recordingClient(calls, {
+      listDrafts: async () => ({
+        ok: true,
+        drafts: [{ id: 'DrScheduled', destinations: [{ channel_id: 'C0123456789' }], date_scheduled: 4102444800 }],
+        has_more: false,
+      }),
+    }), ['draft', '--recipient-id', 'C0123456789', '--message', 'Second message']);
+
+    expect(calls.map((call) => call.method)).toContain('createDraft');
+    expect(calls.map((call) => call.method)).not.toContain('updateDraft');
+    expect(json().draft_id).toBe('Dr1');
+  });
+
+  it('says what frees the slot when Slack answers attached_draft_exists', async () => {
+    const calls: Call[] = [];
+
+    await run(recordingClient(calls, {
+      createDraft: async () => { throw new Error('Slack API error: attached_draft_exists'); },
+    }), ['draft', '--recipient-id', 'C0123456789', '--message', 'Second message']);
+
+    expect(process.exitCode).toBe(1);
+    expect(lastError().message).toContain('attached_draft_exists');
+    expect(lastError().hint).toContain('update-draft');
+    expect(lastError().hint).toContain('--replace');
+  });
+
+  it('adds no slot hint to another draft failure', async () => {
+    const calls: Call[] = [];
+
+    await run(recordingClient(calls, {
+      createDraft: async () => { throw new Error('Slack API error: channel_not_found'); },
+    }), ['draft', '--recipient-id', 'C0123456789', '--message', 'Second message']);
+
+    expect(process.exitCode).toBe(1);
+    expect(lastError().hint ?? '').not.toContain('update-draft');
+  });
+
   it('keeps and reports an existing send time when update-draft changes the text', async () => {
     const calls: Call[] = [];
     const existing = {

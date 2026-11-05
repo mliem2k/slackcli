@@ -12,6 +12,7 @@ import {
   loadActiveDraft,
   findDraftById,
   findDraftForDestination,
+  isScheduledDraft,
   MAX_DRAFT_FILES,
   parseDraftLimit,
   projectDraft,
@@ -398,6 +399,24 @@ describe('finding drafts to replace or delete', () => {
     const newer = { ...channelDraft, id: 'DrNewer', last_updated_ts: '99.000000' };
 
     expect(findDraftForDestination([channelDraft, newer], 'C1')?.id).toBe('DrNewer');
+  });
+
+  it('prefers the unscheduled draft of a destination over a scheduled one, even a newer one', () => {
+    const scheduledNewer = { ...channelDraft, id: 'DrScheduled', last_updated_ts: '99.000000', date_scheduled: 4102444800 };
+
+    expect(findDraftForDestination([channelDraft, scheduledNewer], 'C1')?.id).toBe('DrChannel');
+    expect(findDraftForDestination([scheduledNewer, channelDraft], 'C1')?.id).toBe('DrChannel');
+  });
+
+  it('finds the scheduled draft when it is the only one, and treats a past send time as unscheduled', () => {
+    const scheduled = { ...channelDraft, id: 'DrScheduled', date_scheduled: 4102444800 };
+    const pastSchedule = { ...channelDraft, id: 'DrPast', last_updated_ts: '5.000000', date_scheduled: 1000 };
+
+    expect(findDraftForDestination([scheduled], 'C1')?.id).toBe('DrScheduled');
+    expect(findDraftForDestination([scheduled, pastSchedule], 'C1')?.id).toBe('DrPast');
+    expect(isScheduledDraft(scheduled)).toBe(true);
+    expect(isScheduledDraft(pastSchedule)).toBe(false);
+    expect(isScheduledDraft(channelDraft)).toBe(false);
   });
 
   it('finds a draft by id', () => {

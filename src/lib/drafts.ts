@@ -264,8 +264,14 @@ export function findDraftById(drafts: SlackDraft[], draftId: string): SlackDraft
   return drafts.find((draft) => draft.id === draftId);
 }
 
-// Slack holds one unsent draft per destination (a channel, or a thread inside
-// it), which is why creating a second one fails with attached_draft_exists.
+// Slack holds one unscheduled draft per destination (a channel, or a thread inside
+// it): it sits in the composer, and creating a second one there fails with
+// attached_draft_exists. A scheduled draft leaves the composer, so a new draft
+// can be created beside any number of scheduled ones.
+export function isScheduledDraft(draft: SlackDraft, nowSeconds = Date.now() / 1000): boolean {
+  return Boolean(draft.date_scheduled && draft.date_scheduled > nowSeconds);
+}
+
 export function findDraftForDestination(
   drafts: SlackDraft[],
   channelId: string,
@@ -275,6 +281,9 @@ export function findDraftForDestination(
     const destination = draft.destinations?.[0];
     return destination?.channel_id === channelId && (destination.thread_ts ?? '') === (threadTs ?? '');
   });
-  // Normally at most one; if Slack ever returns several, take the newest.
-  return matches.sort((a, b) => Number(b.last_updated_ts ?? 0) - Number(a.last_updated_ts ?? 0))[0];
+  // The draft in the composer is the one a replace means, so it wins over a scheduled draft even when the
+  // scheduled one was updated later. Among drafts of the same kind take the newest.
+  return matches.sort((a, b) =>
+    Number(isScheduledDraft(a)) - Number(isScheduledDraft(b))
+    || Number(b.last_updated_ts ?? 0) - Number(a.last_updated_ts ?? 0))[0];
 }

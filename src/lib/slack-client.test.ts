@@ -979,6 +979,29 @@ describe('SlackClient.updateDraft', () => {
     expect(Number(call.params.client_last_updated_ts)).toBeGreaterThan(Number(draft.last_updated_ts));
   });
 
+  it('sends a DM draft destination with its channel id only, because Slack refuses channel_id and user_ids together', async () => {
+    const dmDraft = {
+      ...draft,
+      destinations: [{ channel_id: 'D1', thread_ts: '1791289274.671509', broadcast: false, user_ids: ['U1'] }],
+    };
+    const client = new TestSlackClient();
+
+    await client.updateDraft(dmDraft, 'new text');
+
+    expect(JSON.parse(client.calls[0]!.params.destinations as string)).toEqual([
+      { channel_id: 'D1', thread_ts: '1791289274.671509', broadcast: false },
+    ]);
+  });
+
+  it('keeps user_ids when the destination has no channel id', async () => {
+    const newMessageDraft = { ...draft, destinations: [{ user_ids: ['U1', 'U2'] }] };
+    const client = new TestSlackClient();
+
+    await client.updateDraft(newMessageDraft, 'new text');
+
+    expect(JSON.parse(client.calls[0]!.params.destinations as string)).toEqual([{ user_ids: ['U1', 'U2'] }]);
+  });
+
   it('keeps the draft\'s files on a text-only update, and replaces them when new ids are given', async () => {
     const withFiles = { ...draft, file_ids: ['F1', 'F2'] };
     const client = new TestSlackClient();
