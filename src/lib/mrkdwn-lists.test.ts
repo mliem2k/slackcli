@@ -18,7 +18,13 @@ describe('parseMrkdwn lists', () => {
     expect(els[1].style).toBe('bullet');
     expect(els[1].indent).toBe(0);
     expect(els[1].elements.map(sectionText)).toEqual(['first', 'second']);
-    expect(sectionText(els[2])).toBe('After.');
+    // The blank line after the list is kept as the gap before the next text.
+    expect(sectionText(els[2])).toBe('\nAfter.');
+  });
+
+  it('adds no gap when text follows a list directly', () => {
+    const els = blocks('• first\nAfter.');
+    expect(sectionText(els[1])).toBe('After.');
   });
 
   it('accepts "- " as a bullet and "1. " / "2) " as ordered items', () => {

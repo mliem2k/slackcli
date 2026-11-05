@@ -409,8 +409,8 @@ export function parseMrkdwn(input: string, opts: InlineOptions = {}): RichTextBl
 
   for (const part of segments) {
     if (part.kind === 'prose') {
-      // A blank line right after a list is the list's own spacing, not text.
-      if (prose.length === 0 && elements.at(-1)?.type === 'rich_text_list' && part.text === '') continue;
+      // A blank line right after a list is kept: it becomes a leading "\n" in the
+      // next section, which is how Slack's composer stores the gap after a list.
       prose.push(part.text);
       continue;
     }
