@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`canvas edit-cell`**: replace one table cell in a canvas by driving a signed-in browser window, for workspaces where the canvas API cannot edit a cell. `--row-anchor` finds the row by exact text, `--column-offset` picks the cell, and `--under-heading`, `--occurrence` and `--skip-narrow-rows` disambiguate repeated tables and anchors. Takes `--text` (`""` clears), `--headless`, `--json` (`{ ok, before, after }`) and `--workspace`; browser session tokens only
+
 ## [0.19.0] - 2026-11-01
 
 ### Removed

@@ -164,6 +164,7 @@ slackcli messages send --permalink="$LINK" --message="On it 👀"
 | Find a channel or a person | `slackcli search people "ada"` | [search](docs/user-guide/search.md) |
 | Work through "saved for later" | `slackcli saved list --state=to_do` | [saved items](docs/user-guide/saved.md) |
 | Read a Canvas as Markdown | `slackcli canvas read F123` | [canvas](docs/user-guide/canvas.md) |
+| Edit one Canvas table cell | `slackcli canvas edit-cell F123 --row-anchor "Release 1.2" --column-offset 2 --text Done` | [canvas](docs/user-guide/canvas.md) |
 | Inspect or download a Slack file | `slackcli files info F123` | [files](docs/user-guide/files.md) |
 | Upload a file with a message | `slackcli messages send --file=./report.pdf …` | [messages](docs/user-guide/messages.md) |
 | Post rich Block Kit content | `slackcli messages send --blocks=@blocks.json …` | [messages](docs/user-guide/messages.md) |
@@ -373,6 +374,7 @@ slackcli canvas read F1234567890             # Canvas -> Markdown
 slackcli canvas sections F1234567890 --type h2   # section IDs (app token)
 slackcli canvas create --title Notes --markdown-file ./notes.md   # app token
 slackcli canvas edit F1234567890 --operation insert_at_end --markdown-file ./more.md
+slackcli canvas edit-cell F123 --row-anchor="Release 1.2" --column-offset=2 --text="Done"   # browser only
 slackcli files info F1234567890
 slackcli files read F1234567890              # email plain_text or original text
 slackcli files download F1234567890 --output ./report.pdf

@@ -40,7 +40,7 @@ They hold no Slack API knowledge.
 | File | Subcommands |
 |---|---|
 | `auth.ts` | `login`, `login-browser`, `login-auto`, `whoami`, `list`, `set-default`, `remove`, `logout`, `extract-tokens`, `parse-curl` |
-| `canvas.ts` | `list`, `read`, `sections`, `create`, `edit` |
+| `canvas.ts` | `list`, `read`, `sections`, `create`, `edit`, `edit-cell` |
 | `conversations.ts` | `list`, `read`, `get`, `unread`, `mark-read`, `members list`/`add`/`remove`, `join`, `leave` |
 | `files.ts` | `info`, `read`, `download` |
 | `logs.ts` | `path`, `show`, `clear` |
@@ -72,6 +72,7 @@ They hold no Slack API knowledge.
 | `canvas-sections.ts` | `canvas sections`'s lookup criteria (`buildSectionCriteria()`: `--type` / `--contains`, at least one, validated before any Slack call) and the section IDs read back from `canvases.sections.lookup` (`sectionsOf()`). |
 | `canvas-write.ts` | `canvas create` / `canvas edit`'s input: `readCanvasMarkdown()` (a file or `-` for stdin, bounded, with Slack's 1,048,576-character limit), `checkEditOptions()` / `buildCanvasChange()` (what each `canvases.edit` operation needs and allows, checked before any Slack call), and `isDestructiveOperation()` (`replace`/`delete` ask for confirmation). |
 | `canvas-read.ts` | `canvas read`'s work: resolves the canvas ID (explicit or a channel's canvas), downloads its HTML, and resolves `<@U…>` / `<#C…>` mentions. Expected failures throw `CanvasReadError` carrying their exit code. |
+| `canvas-editor.ts` | `canvas edit-cell`'s browser-driven table editor: finds the row by exact anchor text (optionally under a heading), resolves the column offset, clears and types the replacement through the CDP client, and reads the canvas back to confirm the edit persisted. Its DOM and CDP seams are injectable for tests. |
 | `rate-limiter.ts` | Concurrency cap and minimum interval shared by every Slack API call. Logs waits at `debug`. |
 | `auth-errors.ts` | Pure classifier for Slack's five authentication codes (`invalid_auth`, `token_expired`, `token_revoked`, `not_authed`, `account_inactive`): the meaning and fix for a profile, the three-line message, the `SlackAuthError` that `SlackClient.request()` throws for them on both auth paths, and the separate wording for a token rejected during login. |
 | `retry.ts` | Pure retry policy for browser-auth calls: which failures are retried (429 always, 5xx/network errors for the `READ_METHODS` allowlist only), `Retry-After` parsing, backoff with jitter, and the attempt/wait caps. |

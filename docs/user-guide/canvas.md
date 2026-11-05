@@ -2,9 +2,10 @@
 
 `slackcli canvas` lists Slack canvases and reads them as Markdown, which makes
 them usable in a terminal, a diff, or an AI agent's context. `canvas sections`
-finds the IDs of a canvas's sections by section type or text, and `canvas create`
-and `canvas edit` write canvases from Markdown, so a script can keep a status
-page or a checklist current: read it, find the section, edit it.
+finds the IDs of a canvas's sections by section type or text, `canvas create`
+and `canvas edit` write canvases from Markdown, and `canvas edit-cell` updates
+one table cell in the browser, so a script can keep a status page or a checklist
+current: read it, find the section or cell, edit it.
 
 ## `canvas list`
 
@@ -221,3 +222,43 @@ the `canvases:write` scope. Slack answers the canvases API with
 `not_allowed_token_type` on a browser session, so a browser profile fails with
 `unsupported_auth_type` before any call (a `--channel` name is not looked up
 either).
+
+## `canvas edit-cell`
+
+Replace the text of one table cell by driving a real browser window, for
+workspaces where Slack's canvas API cannot edit a cell:
+
+```bash
+slackcli canvas edit-cell F1234567890 --row-anchor "Release 1.2" --column-offset 2 --text "Done"
+
+# Under one heading, clearing the cell, as JSON
+slackcli canvas edit-cell F1234567890 --under-heading "Week #2" --row-anchor "Alice" \
+  --column-offset 1 --text "" --json
+
+# The second match of an anchor that appears more than once
+slackcli canvas edit-cell F1234567890 --row-anchor "Release 1.2" --occurrence 2 \
+  --column-offset 0 --text "Renamed" --headless
+```
+
+| Option | Purpose |
+|---|---|
+| `--row-anchor <text>` | Exact text of an existing cell that identifies the row |
+| `--column-offset <n>` | Cells to the right of the anchor to edit (`0` edits the anchor cell) |
+| `--text <text>` | Replacement text; `""` clears the cell |
+| `--under-heading <text>` | Only the table under the heading with exactly this text |
+| `--occurrence <n>` | Which anchor match to use, 1-indexed among resolvable rows (default `1`) |
+| `--skip-narrow-rows` | Skip a row too narrow for `--column-offset` instead of failing |
+| `--headless` | Run without a visible window; only when the profile is already signed in |
+| `--workspace <id\|name>` | Workspace to use |
+| `--json` | `{ ok, before, after }` instead of the human lines |
+
+`--under-heading` makes a row that is too narrow for the offset fail instead of
+the search moving on to another table; `--skip-narrow-rows` restores skipping.
+`--occurrence` counts top-to-bottom among rows where the offset resolves to a
+real cell. After typing, the command polls the canvas for up to about 18
+seconds to confirm the cell persisted.
+
+**Browser session tokens only.** The edit is made in Slack's web UI, so it needs
+a signed-in browser profile (`auth login-auto`, `auth login-browser` or
+`parse-curl`); an app token fails before any call. The command has no
+confirmation prompt and no `--dry-run`.

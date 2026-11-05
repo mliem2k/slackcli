@@ -15,6 +15,7 @@ const BROWSER_ONLY = new Set([
   'slackcli messages draft',
   'slackcli messages send-draft',
   'slackcli messages delete-draft',
+  'slackcli canvas edit-cell',
   'slackcli emoji add',
   'slackcli emoji remove',
   'slackcli saved add',
