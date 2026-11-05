@@ -95,6 +95,36 @@ describe('parseMrkdwn lists', () => {
   });
 });
 
+describe('parseMrkdwn numbering across prose', () => {
+  const kinds = (text: string) => blocks(text).map((e: any) => e.type.replace('rich_text_', ''));
+
+  it('keeps items that count on after a text line as literal text, so each shows its own number', () => {
+    const text = '1. one\nMR: x\n\n2. two\nMR: y\n\n3. three\nMR: z';
+    const els = blocks(text);
+    expect(els).toHaveLength(1);
+    expect(els[0].type).toBe('rich_text_section');
+    expect(sectionText(els[0])).toBe(text);
+  });
+
+  it('demotes the whole run, including the items before the interruption', () => {
+    expect(kinds('1. a\n2. b\nnote\n3. c')).toEqual(['section']);
+  });
+
+  it('keeps a real list for items that follow each other, and for a "1." after prose', () => {
+    expect(kinds('1. a\n2. b\n3. c')).toEqual(['list']);
+    expect(kinds('1. a\n2. b\n\nText\n1. c\n2. d')).toEqual(['list', 'section', 'list']);
+  });
+
+  it('leaves a list that starts at a higher number, and bullets, alone', () => {
+    expect(kinds('3. a\n4. b')).toEqual(['list']);
+    expect(kinds('- a\ntext\n- b')).toEqual(['list', 'section', 'list']);
+  });
+
+  it('still turns the surrounding bullets into a list', () => {
+    expect(kinds('1. a\ntext\n2. b\n\n- x\n- y')).toEqual(['section', 'list']);
+  });
+});
+
 describe('parseMrkdwn emoji', () => {
   const inline = (text: string) => (parseMrkdwn(text)[0].elements[0] as any).elements;
 

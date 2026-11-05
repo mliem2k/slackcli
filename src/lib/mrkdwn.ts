@@ -330,7 +330,7 @@ function section(text: string, opts: InlineOptions = {}): RichTextSection {
 // a whole fenced code block.
 type Segment =
   | { kind: 'prose'; text: string }
-  | { kind: 'item'; item: ListLine }
+  | { kind: 'item'; item: ListLine; raw: string }
   | { kind: 'code'; text: string };
 
 const FENCE = '```';
@@ -347,7 +347,7 @@ function segment(text: string): Segment[] {
     if (code === null) {
       if (fences % 2 === 0) {
         const item = listLine(line);
-        segments.push(item ? { kind: 'item', item } : { kind: 'prose', text: line });
+        segments.push(item ? { kind: 'item', item, raw: line } : { kind: 'prose', text: line });
         continue;
       }
       const at = line.lastIndexOf(FENCE);
@@ -373,6 +373,69 @@ function segment(text: string): Segment[] {
   return segments;
 }
 
+/**
+ * Numbered items that continue a count across prose ("1. a", a paragraph, "2. b").
+ * Slack's composer cannot continue a numbered list across a text section: the
+ * second list shows "1." again, whatever its offset says. Such a run of items is
+ * kept as the literal text typed ("2. b"), which always shows the right number.
+ * Only items that keep counting are affected: a "1." after prose still starts a new
+ * list, and items that follow each other directly stay one real list.
+ */
+function keepInterruptedNumberingAsText(segments: Segment[]): Segment[] {
+  const demote = new Set<number>();
+  // The consecutive ordered items at one indent, each run ended by prose or another kind of item.
+  let run: number[] = [];
+  let chain: number[] = [];
+  let sawProse = false;
+  const closeRun = () => {
+    if (run.length > 0) chain = chain.concat(run);
+    run = [];
+  };
+  const closeChain = () => {
+    closeRun();
+    chain = [];
+  };
+  for (let index = 0; index < segments.length; index++) {
+    const part = segments[index];
+    if (part.kind === 'prose') {
+      if (run.length > 0) closeRun();
+      sawProse = true;
+      continue;
+    }
+    if (part.kind === 'code') {
+      closeChain();
+      sawProse = false;
+      continue;
+    }
+    const { item } = part;
+    const last = chain.length > 0 ? chain[chain.length - 1] : run.length > 0 ? run[run.length - 1] : -1;
+    const previous = last >= 0 ? (segments[last] as { kind: 'item'; item: ListLine }).item : undefined;
+    const sameLevel = item.style === 'ordered' && previous && previous.style === 'ordered' && previous.indent === item.indent;
+    if (!sameLevel) {
+      closeChain();
+      sawProse = false;
+      if (item.style === 'ordered') run = [index];
+      continue;
+    }
+    if (sawProse && run.length === 0) {
+      // A new run after prose: it continues the count when it does not start again at 1.
+      if (item.number > 1) {
+        for (const member of chain) demote.add(member);
+        demote.add(index);
+        run = [index];
+      } else {
+        chain = [];
+        run = [index];
+      }
+    } else {
+      run.push(index);
+      if (chain.some((member) => demote.has(member))) demote.add(index);
+    }
+    sawProse = false;
+  }
+  return segments.map((part, index) => (demote.has(index) && part.kind === 'item' ? { kind: 'prose', text: part.raw } : part));
+}
+
 export function parseMrkdwn(input: string, opts: InlineOptions = {}): RichTextBlock[] {
   // A --message-file saved with Windows line endings must parse the same.
   const text = input.replace(/\r\n?/g, '\n');
@@ -382,7 +445,7 @@ export function parseMrkdwn(input: string, opts: InlineOptions = {}): RichTextBl
   // Lines that start with "• ", "- " or "1. " become rich_text_list blocks, the
   // structure Slack's own composer writes for a list, so they render as a real list
   // (hanging indent, numbering) instead of literal bullet characters.
-  const segments = segment(text);
+  const segments = keepInterruptedNumberingAsText(segment(text));
   // Only lists and fenced blocks need more than one section.
   if (!segments.some((part) => part.kind === 'item' || part.kind === 'code')) {
     return [{ type: 'rich_text', elements: [section(text, opts)] }];
