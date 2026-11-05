@@ -527,7 +527,17 @@ function resolveTargetArg(
 // names that match nobody (or more than one person) stay plain text, with a warning.
 async function withMentions(client: SlackClient, message: string, spinner: ReturnType<typeof ora>): Promise<string> {
   const previous = spinner.text;
-  const result = await resolveTextMentions(client, message, { onProgress: (text) => { spinner.text = text; } });
+  let result;
+  try {
+    result = await resolveTextMentions(client, message, { onProgress: (text) => { spinner.text = text; } });
+  } catch (err: any) {
+    // Mentions are a convenience: a failed user lookup (missing scope, rate
+    // limit) must not stop the message. Send the text as typed, and say why.
+    spinner.text = previous;
+    spinner.clear();
+    process.stderr.write(`Warning: could not look up @mentions (${err?.message ?? err}); sending the text as typed.\n`);
+    return message;
+  }
   spinner.text = previous;
   if (result.unresolved.length > 0) {
     spinner.clear();

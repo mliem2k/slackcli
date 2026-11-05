@@ -14,7 +14,7 @@ import type {
   SlackScheduledMessageListResponse,
   WorkspaceConfig,
 } from '../types/index.ts';
-import { listBlocksFor, parseMrkdwn } from './mrkdwn.ts';
+import { listBlocksFor, markdownLinksToSlack, parseMrkdwn } from './mrkdwn.ts';
 import { extractSlackWorkspaceName } from './curl-parser.ts';
 import { RateLimiter, slackRateLimiter } from './rate-limiter.ts';
 import { decideRetry, parseRetryAfter, resolveRetryOptions } from './retry.ts';
@@ -653,10 +653,11 @@ export class SlackClient {
   }
 
   // Post message
-  async postMessage(channel: string, text: string, options: {
+  async postMessage(channel: string, rawText: string, options: {
     thread_ts?: string;
     blocks?: Array<Record<string, unknown>>;
   } = {}): Promise<any> {
+    const text = markdownLinksToSlack(rawText);
     const params: Record<string, any> = { channel, text };
     if (options.thread_ts) params.thread_ts = options.thread_ts;
     const blocks = options.blocks ?? listBlocksFor(text);
@@ -672,7 +673,8 @@ export class SlackClient {
     return this.request('chat.getPermalink', { channel, message_ts: messageTs });
   }
 
-  async updateMessage(channel: string, ts: string, text: string): Promise<any> {
+  async updateMessage(channel: string, ts: string, rawText: string): Promise<any> {
+    const text = markdownLinksToSlack(rawText);
     // `parse` must be explicit: chat.update defaults it to `client` (unlike
     // chat.postMessage, which defaults to `none`), and that escapes the
     // `<url|label>` markup in the text, so editing a message kills its links.
@@ -913,11 +915,12 @@ export class SlackClient {
   // this is a write: `retry.ts` never repeats it after an ambiguous failure,
   // and on this path the only retries are the ones `@slack/web-api` makes by
   // itself for every call, exactly as for a post.
-  async scheduleMessage(channel: string, text: string, postAt: number, options: {
+  async scheduleMessage(channel: string, rawText: string, postAt: number, options: {
     thread_ts?: string;
     blocks?: Array<Record<string, unknown>>;
   } = {}): Promise<any> {
     this.requireStandardAuth(SCHEDULED_MESSAGES_AUTH_MESSAGE);
+    const text = markdownLinksToSlack(rawText);
 
     const params: Record<string, any> = { channel, text, post_at: postAt };
     if (options.thread_ts) params.thread_ts = options.thread_ts;

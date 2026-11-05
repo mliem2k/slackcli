@@ -73,4 +73,24 @@ describe('resolveTextMentions', () => {
     expect(r.text).toBe('(<@U0ZHIWEI01>) and "<@U06V56X9T9U>"');
     expect(client.calls).toBe(1);
   });
+
+  it('does not turn shouted words into raw-ID mentions', async () => {
+    const client = stub();
+    const r = await resolveTextMentions(client, 'check @UPDATES and @WORKFLOW');
+    expect(r.text).toBe('check @UPDATES and @WORKFLOW');
+    expect(client.calls).toBe(0);
+  });
+
+  it('leaves link labels, addresses and unclosed fences alone', async () => {
+    const client = stub();
+    const text = '<https://x.com|ask @zhiwei> mail @zhiwei@x.com\n```\n@zhiwei';
+    const r = await resolveTextMentions(client, text);
+    expect(r.text).toBe(text);
+    expect(client.calls).toBe(0);
+  });
+
+  it('still takes a trailing period off a handle', async () => {
+    const r = await resolveTextMentions(stub(), 'thanks @zhiwei. and @liem.michael-');
+    expect(r.text).toBe('thanks <@U0ZHIWEI01>. and <@U06V56X9T9U>-');
+  });
 });

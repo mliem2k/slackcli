@@ -400,12 +400,17 @@ export async function resolveUserList(
 // A plain `@name` in message text: after the start, whitespace or opening
 // punctuation (so an email address or `<@U…>` never matches), ending on a
 // letter or digit (so a trailing period stays out).
-const TEXT_MENTION = /(^|[\s([{"'])@([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)/g;
-// Code spans and blocks are left as typed.
-const CODE_SPAN = /(```[\s\S]*?```|`[^`\n]*`)/;
+// The name may not run on into another "@" ("@alice@x.com" is an address) or
+// into more name characters; a trailing period or dash stays out of it.
+const TEXT_MENTION = /(^|[\s([{"'])@([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?![A-Za-z0-9_@]|[.-][A-Za-z0-9])/g;
+// Left as typed: code blocks (an unclosed fence runs to the end), code spans,
+// and <…> tokens such as links, whose label may contain an "@".
+const CODE_SPAN = /(```[\s\S]*?```|```[\s\S]*$|`[^`\n]*`|<[^>\n]*>)/;
 // Broadcasts ping everyone, so they are never converted from plain text.
 const BROADCAST_WORDS = new Set(['here', 'channel', 'everyone']);
-const USER_ID_PATTERN = /^[UW][A-Z0-9]{6,}$/;
+// A raw user ID written as "@U0123ABCD". Real IDs always contain a digit, which
+// keeps shouted words such as "@UPDATES" or "@WORKFLOW" out.
+const USER_ID_PATTERN = /^[UW](?=[A-Z0-9]*\d)[A-Z0-9]{6,}$/;
 
 export interface TextMentionResult {
   text: string;

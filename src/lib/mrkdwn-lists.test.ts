@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { listBlocksFor, parseMrkdwn } from './mrkdwn';
+import { listBlocksFor, markdownLinksToSlack, parseMrkdwn } from './mrkdwn';
 
 const blocks = (text: string) => parseMrkdwn(text)[0].elements as any[];
 const sectionText = (el: any) => el.elements.map((e: any) => e.text ?? `<@${e.user_id}>`).join('');
@@ -48,7 +48,7 @@ describe('parseMrkdwn lists', () => {
     expect(blocks('-5 degrees')).toHaveLength(1);
     const fenced = blocks('```\n- not a list\n```');
     expect(fenced).toHaveLength(1);
-    expect(fenced[0].type).toBe('rich_text_section');
+    expect(fenced[0].type).toBe('rich_text_preformatted');
   });
 
   it('continues numbering after a nested list instead of restarting at 1', () => {
@@ -68,8 +68,7 @@ describe('parseMrkdwn lists', () => {
 
   it('treats a fence opened mid-line as code', () => {
     const els = blocks('see ```\n- not a list\n```');
-    expect(els).toHaveLength(1);
-    expect(els[0].type).toBe('rich_text_section');
+    expect(els.map((e: any) => e.type)).toEqual(['rich_text_section', 'rich_text_preformatted']);
   });
 
   it('keeps a list line with inline ```code``` in the list', () => {
@@ -150,5 +149,56 @@ describe('parseMrkdwn inline triple backticks', () => {
       { type: 'text', text: 'x', style: { code: true } },
       { type: 'text', text: ' here' },
     ]);
+  });
+});
+
+describe('review fixes', () => {
+  it('parses Windows line endings like Unix ones', () => {
+    const els = blocks('- a\r\n- b\r\nafter');
+    expect(els.map((e: any) => e.type)).toEqual(['rich_text_list', 'rich_text_section']);
+    expect(els[0].elements.map(sectionText)).toEqual(['a', 'b']);
+  });
+
+  it('links bare URLs only on the send path', () => {
+    const sent = listBlocksFor('- see https://example.com/a_b_(c). next')![0].elements[0] as any;
+    expect(sent.elements[0].elements).toEqual([
+      { type: 'text', text: 'see ' },
+      { type: 'link', url: 'https://example.com/a_b_(c)' },
+      { type: 'text', text: '. next' },
+    ]);
+    const draft = blocks('- see https://example.com')[0].elements[0].elements;
+    expect(draft).toEqual([{ type: 'text', text: 'see https://example.com' }]);
+  });
+
+  it('drops an unbalanced closing paren from a bare URL', () => {
+    const sent = listBlocksFor('- (see https://example.com/x)')![0].elements[0] as any;
+    expect(sent.elements[0].elements[1]).toEqual({ type: 'link', url: 'https://example.com/x' });
+  });
+
+  it('turns a fenced block without lists into preformatted text', () => {
+    const els = blocks('Run:\n```\nnpm test\n```');
+    expect(els.map((e: any) => e.type)).toEqual(['rich_text_section', 'rich_text_preformatted']);
+    expect(listBlocksFor('Run:\n```\nnpm test\n```')).toBeUndefined();
+  });
+});
+
+describe('Markdown links', () => {
+  it('become link elements with the label in rich text', () => {
+    const els = blocks('filed [F22-7435](https://x.atlassian.net/browse/F22-7435) for you')[0].elements;
+    expect(els).toEqual([
+      { type: 'text', text: 'filed ' },
+      { type: 'link', url: 'https://x.atlassian.net/browse/F22-7435', text: 'F22-7435' },
+      { type: 'text', text: ' for you' },
+    ]);
+  });
+
+  it('become <url|label> in sent text, but not inside code', () => {
+    expect(markdownLinksToSlack('see [docs](https://a.b/c) and `[x](https://y.z)`'))
+      .toBe('see <https://a.b/c|docs> and `[x](https://y.z)`');
+  });
+
+  it('leave brackets that are not links alone', () => {
+    expect(markdownLinksToSlack('[WIP] (draft) [a](not a url)')).toBe('[WIP] (draft) [a](not a url)');
+    expect(blocks('[WIP] done')[0].elements).toEqual([{ type: 'text', text: '[WIP] done' }]);
   });
 });

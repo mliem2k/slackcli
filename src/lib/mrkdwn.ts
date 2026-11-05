@@ -79,6 +79,11 @@ interface SpanBounds {
   nextIndex: number;
 }
 
+interface InlineOptions {
+  /** Turn bare http(s) URLs into link elements (send path; drafts keep them as text). */
+  linkUrls?: boolean;
+}
+
 interface MarkerMatch {
   elements: RichTextElement[];
   nextIndex: number;
@@ -114,7 +119,7 @@ function findSpan(text: string, marker: string, i: number): SpanBounds | null {
 
 // Build the elements for one span's inner text, applying `styleKey` on top of any
 // styles the inner text carries itself.
-function styleSpan(inner: string, styleKey: keyof RichTextStyle): RichTextElement[] {
+function styleSpan(inner: string, styleKey: keyof RichTextStyle, opts: InlineOptions): RichTextElement[] {
   // Code spans don't nest
   if (styleKey === 'code') {
     const style: RichTextStyle = { [styleKey]: true };
@@ -122,7 +127,7 @@ function styleSpan(inner: string, styleKey: keyof RichTextStyle): RichTextElemen
   }
 
   // Recursively parse inner content for nested formatting, keeping each element's type
-  return parseInline(inner).map(el => ({
+  return parseInline(inner, opts).map(el => ({
     ...el,
     style: { ...el.style, [styleKey]: true },
   }));
@@ -130,7 +135,7 @@ function styleSpan(inner: string, styleKey: keyof RichTextStyle): RichTextElemen
 
 // Try every marker at position `i`, returning the span's elements and the index to
 // continue the walk from, or null when no marker applies there.
-function tryMatchMarker(text: string, i: number): MarkerMatch | null {
+function tryMatchMarker(text: string, i: number, opts: InlineOptions): MarkerMatch | null {
   // ```x``` on one line is inline code too, as Slack renders it.
   if (text.startsWith('```', i)) {
     const end = text.indexOf('```', i + 3);
@@ -143,7 +148,7 @@ function tryMatchMarker(text: string, i: number): MarkerMatch | null {
     const span = findSpan(text, marker, i);
     if (!span) continue;
 
-    return { elements: styleSpan(span.inner, styleKey), nextIndex: span.nextIndex };
+    return { elements: styleSpan(span.inner, styleKey, opts), nextIndex: span.nextIndex };
   }
 
   return null;
@@ -225,13 +230,59 @@ function tryMatchEmoji(text: string, i: number): MarkerMatch | null {
   return match ? { elements: [{ type: 'emoji', name: match[1] }], nextIndex: i + match[0].length } : null;
 }
 
-function parseInline(text: string): RichTextElement[] {
+// A Markdown link, [label](url). Slack mrkdwn has no such syntax (it shows the
+// brackets literally), so it becomes a link element with the label, the same as
+// Slack's own <url|label>.
+const MD_LINK = /^\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)/;
+
+function tryMatchMarkdownLink(text: string, i: number): MarkerMatch | null {
+  if (text[i] !== '[') return null;
+  const match = MD_LINK.exec(text.slice(i));
+  return match ? { elements: [{ type: 'link', url: match[2], text: match[1] }], nextIndex: i + match[0].length } : null;
+}
+
+/**
+ * Rewrite Markdown links to Slack's <url|label> in plain message text, outside
+ * code. For the text Slack renders itself (send, edit, schedule) and the
+ * notification fallback; the rich_text path makes link elements instead.
+ */
+export function markdownLinksToSlack(text: string): string {
+  return text
+    .split(/(```[\s\S]*?```|```[\s\S]*$|`[^`\n]*`)/)
+    .map((part, index) => (index % 2 === 1
+      ? part
+      : part.replace(/\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)/g, (_whole, label: string, url: string) => `<${url}|${label.replace(/[<>|]/g, '')}>`)))
+    .join('');
+}
+
+// A bare http(s) URL. Plain-text messages get these linked by Slack's own
+// mrkdwn rendering; rich_text needs a link element or the URL is not clickable.
+// Trailing sentence punctuation stays out, and so does a ")" with no "(" in the URL.
+const BARE_URL = /^https?:\/\/[^\s<>]+/;
+
+function tryMatchUrl(text: string, i: number): MarkerMatch | null {
+  if (text[i] !== 'h' || (i > 0 && /[A-Za-z0-9]/.test(text[i - 1]))) return null;
+  const match = BARE_URL.exec(text.slice(i));
+  if (!match) return null;
+  let url = match[0].replace(/[.,;:!?'"*_~]+$/, '');
+  while (url.endsWith(')') && (url.match(/\(/g) ?? []).length < (url.match(/\)/g) ?? []).length) {
+    url = url.slice(0, -1).replace(/[.,;:!?'"*_~]+$/, '');
+  }
+  if (!/^https?:\/\/[^/]/.test(url)) return null;
+  return { elements: [{ type: 'link', url }], nextIndex: i + url.length };
+}
+
+function parseInline(text: string, opts: InlineOptions = {}): RichTextElement[] {
   const elements: RichTextElement[] = [];
 
   let i = 0;
   while (i < text.length) {
     // Tokens go first so a marker character inside a URL never opens a span
-    const match = tryMatchToken(text, i) ?? tryMatchEmoji(text, i) ?? tryMatchMarker(text, i);
+    const match = tryMatchToken(text, i)
+      ?? tryMatchMarkdownLink(text, i)
+      ?? (opts.linkUrls ? tryMatchUrl(text, i) : null)
+      ?? tryMatchEmoji(text, i)
+      ?? tryMatchMarker(text, i, opts);
     if (match) {
       elements.push(...match.elements);
       i = match.nextIndex;
@@ -270,8 +321,8 @@ function listLine(line: string): ListLine | null {
   };
 }
 
-function section(text: string): RichTextSection {
-  const elements = parseInline(text);
+function section(text: string, opts: InlineOptions = {}): RichTextSection {
+  const elements = parseInline(text, opts);
   return { type: 'rich_text_section', elements: elements.length > 0 ? elements : [{ type: 'text', text: '' }] };
 }
 
@@ -322,7 +373,9 @@ function segment(text: string): Segment[] {
   return segments;
 }
 
-export function parseMrkdwn(text: string): RichTextBlock[] {
+export function parseMrkdwn(input: string, opts: InlineOptions = {}): RichTextBlock[] {
+  // A --message-file saved with Windows line endings must parse the same.
+  const text = input.replace(/\r\n?/g, '\n');
   // Keep newlines embedded in text elements rather than splitting into multiple sections.
   // Slack's draft composer renders multiple rich_text_section elements inline (no line breaks),
   // but correctly preserves \n characters within a single text element.
@@ -330,8 +383,9 @@ export function parseMrkdwn(text: string): RichTextBlock[] {
   // structure Slack's own composer writes for a list, so they render as a real list
   // (hanging indent, numbering) instead of literal bullet characters.
   const segments = segment(text);
-  if (!segments.some((part) => part.kind === 'item')) {
-    return [{ type: 'rich_text', elements: [section(text)] }];
+  // Only lists and fenced blocks need more than one section.
+  if (!segments.some((part) => part.kind === 'item' || part.kind === 'code')) {
+    return [{ type: 'rich_text', elements: [section(text, opts)] }];
   }
 
   const elements: RichTextBlockElement[] = [];
@@ -348,7 +402,7 @@ export function parseMrkdwn(text: string): RichTextBlock[] {
     if (prose.length === 0) return;
     // The line break before a list belongs to the list, as in Slack's composer.
     const body = prose.join('\n').replace(/\n$/, '');
-    if (body.length > 0 || elements.length === 0) elements.push(section(body));
+    if (body.length > 0 || elements.length === 0) elements.push(section(body, opts));
     prose = [];
     endRun();
   };
@@ -374,7 +428,7 @@ export function parseMrkdwn(text: string): RichTextBlock[] {
 
     const last = elements.at(-1);
     if (last?.type === 'rich_text_list' && last.style === item.style && last.indent === item.indent) {
-      last.elements.push(section(item.text));
+      last.elements.push(section(item.text, opts));
     } else {
       // Slack's message view draws a list that comes back up from a nested list
       // in the style of the earlier list at that level ("1." under a bullet list
@@ -384,7 +438,7 @@ export function parseMrkdwn(text: string): RichTextBlock[] {
       if (earlier && earlier !== item.style && last?.type === 'rich_text_list' && last.indent > item.indent) {
         elements.push({ type: 'rich_text_section', elements: [] });
       }
-      const list: RichTextList = { type: 'rich_text_list', style: item.style, indent: item.indent, elements: [section(item.text)] };
+      const list: RichTextList = { type: 'rich_text_list', style: item.style, indent: item.indent, elements: [section(item.text, opts)] };
       // Continue from the items already shown at this level, or from the number
       // typed when it is higher ("2." after a bullet at the same level, as in
       // Markdown). "1." on every line still counts up through the counter.
@@ -416,6 +470,7 @@ export function parseMrkdwn(text: string): RichTextBlock[] {
  * every other message keeps Slack's own text rendering exactly as before.
  */
 export function listBlocksFor(text: string): RichTextBlock[] | undefined {
-  const blocks = parseMrkdwn(text);
+  // Sent with blocks, the text loses Slack's own linking of bare URLs, so link them here.
+  const blocks = parseMrkdwn(text, { linkUrls: true });
   return blocks[0].elements.some((element) => element.type === 'rich_text_list') ? blocks : undefined;
 }
