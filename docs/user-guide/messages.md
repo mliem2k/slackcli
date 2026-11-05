@@ -149,6 +149,22 @@ MSG
 
 The same works on `messages edit` and `messages draft`.
 
+### Mentions (`@handle`)
+
+Plain `@name` in the text becomes a real Slack mention when exactly one active
+person matches: an exact handle (`@alice`, case-insensitive), a unique first
+name (`@Alice`), or a raw user ID (`@U0123456789`). It costs one `users.list`
+scan per message; a message with no `@name` makes no lookup. Emails, existing
+`<…>` tokens and code spans are left as typed, and `@here`, `@channel` and
+`@everyone` are never turned into broadcasts. A name that matches nobody, or
+more than one person, stays plain text and is named in a warning on stderr, so
+the CLI never guesses who to ping. Use the handle shown by
+`slackcli search people <query>`, or write a `<@U…>` token yourself, when a
+name is ambiguous.
+
+This works on `send`, `edit`, `draft` and `schedule`. With `--blocks` the blocks
+are passed through unchanged; only the text fallback is resolved.
+
 ### JSON output (`--json`)
 
 `--json` replaces the human success line with a single object on stdout, so a

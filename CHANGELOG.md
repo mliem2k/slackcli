@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Plain `@handle` mentions**: plain `@alice` (an exact handle, case-insensitive), a unique `@FirstName` or a raw `@U…` in the text of `messages send`, `edit`, `draft` and `schedule` now becomes a real Slack mention instead of literal text. One `users.list` scan per message, none without an `@name`; emails, existing `<…>` tokens and code spans are left alone, and `@here`/`@channel`/`@everyone` are never auto-broadcast. A name that matches nobody, or more than one person, stays plain text and is reported on stderr
+
 ## [0.19.0] - 2026-11-01
 
 ### Removed
