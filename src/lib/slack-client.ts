@@ -15,6 +15,30 @@ import type {
   WorkspaceConfig,
 } from '../types/index.ts';
 import { listBlocksFor, markdownLinksToSlack, parseMrkdwn } from './mrkdwn.ts';
+
+const UPDATE_TEXT_LIMIT = 4000;
+
+// Trim text to chat.update's limit as Slack counts it (measured live): UTF-8
+// bytes, so a curly quote costs 3, and & costs 5 (&amp;). < and > are counted
+// as 4 to be safe. A cut inside <url|label> or <@U…> markup would show the raw
+// half, so the cut moves back before it.
+const utf8 = new TextEncoder();
+export function fitUpdateText(text: string): string {
+  const cost = (ch: string) => (ch === '&' ? 5 : ch === '<' || ch === '>' ? 4 : utf8.encode(ch).length);
+  let total = 0;
+  for (const ch of text) total += cost(ch);
+  if (total <= UPDATE_TEXT_LIMIT) return text;
+  let used = cost('…');
+  let end = 0;
+  for (const ch of text) {
+    if (used + cost(ch) > UPDATE_TEXT_LIMIT) break;
+    used += cost(ch);
+    end += ch.length;
+  }
+  let cut = text.slice(0, end);
+  if (cut.lastIndexOf('<') > cut.lastIndexOf('>')) cut = cut.slice(0, cut.lastIndexOf('<'));
+  return `${cut.trimEnd()}…`;
+}
 import { extractSlackWorkspaceName } from './curl-parser.ts';
 import { RateLimiter, slackRateLimiter } from './rate-limiter.ts';
 import { decideRetry, parseRetryAfter, resolveRetryOptions } from './retry.ts';
@@ -679,7 +703,12 @@ export class SlackClient {
     // chat.postMessage, which defaults to `none`), and that escapes the
     // `<url|label>` markup in the text, so editing a message kills its links.
     const blocks = listBlocksFor(text);
-    return this.request('chat.update', { channel, ts, text, parse: 'none', ...(blocks ? { blocks } : {}) });
+    // chat.update rejects text over 4,000 characters once Slack has escaped it
+    // (msg_too_long), where chat.postMessage accepts it. With blocks the text is
+    // only the notification fallback, so trim it; without blocks Slack's own
+    // error stands.
+    const fallback = blocks ? fitUpdateText(text) : text;
+    return this.request('chat.update', { channel, ts, text: fallback, parse: 'none', ...(blocks ? { blocks } : {}) });
   }
 
   async deleteMessage(channel: string, ts: string): Promise<any> {

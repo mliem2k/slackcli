@@ -9,6 +9,7 @@ import {
   DRAFT_CREATE_AUTH_MESSAGE,
   SAVED_WRITE_AUTH_MESSAGE,
   SCHEDULED_MESSAGES_AUTH_MESSAGE,
+  fitUpdateText,
   SlackClient,
   SlackTransportError,
   toScheduledMessageSummary,
@@ -733,6 +734,36 @@ describe('SlackClient.updateMessage', () => {
     await client.updateMessage('C123', '1234567890.123456', 'A <https://example.com|label> B');
 
     expect(client.calls[0]!.params.parse).toBe('none');
+  });
+
+  it('trims the fallback text to 4,000 bytes when the edit has blocks', async () => {
+    const client = new TestSlackClient();
+    const long = `Intro\n• item\n${'x'.repeat(5000)}`;
+
+    await client.updateMessage('C123', '1234567890.123456', long);
+
+    const params = client.calls[0]!.params as { text: string; blocks: unknown };
+    expect(params.blocks).toBeDefined();
+    expect(new TextEncoder().encode(params.text).length).toBe(4000);
+    expect(params.text.endsWith('…')).toBe(true);
+    expect(JSON.stringify(params.blocks)).toContain('x'.repeat(5000));
+  });
+
+  it('leaves long text without blocks for Slack to judge', async () => {
+    const client = new TestSlackClient();
+
+    await client.updateMessage('C123', '1234567890.123456', 'y'.repeat(5000));
+
+    expect((client.calls[0]!.params as { text: string }).text.length).toBe(5000);
+  });
+
+  it('counts & < > the way Slack escapes them and never cuts inside link markup', () => {
+    expect(fitUpdateText('&'.repeat(900))).toBe('&'.repeat(799) + '…');
+    expect(fitUpdateText('’'.repeat(1400))).toBe('’'.repeat(1332) + '…');
+    const link = '<https://a.b/c|label>';
+    const cut = fitUpdateText('a'.repeat(3985) + link + 'z'.repeat(100));
+    expect(cut).toBe('a'.repeat(3985) + '…');
+    expect(fitUpdateText('short & sweet')).toBe('short & sweet');
   });
 });
 
