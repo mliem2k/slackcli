@@ -120,6 +120,17 @@ describe('parseMrkdwn numbering across prose', () => {
     expect(kinds('- a\ntext\n- b')).toEqual(['list', 'section', 'list']);
   });
 
+  it('keeps a lone numbered item that is followed by text as literal text, so the lines under it keep their breaks', () => {
+    const text = 'Hi\n\n1. title\nMR: x\nTicket: y\n\nBye';
+    expect(kinds(text)).toEqual(['section']);
+    expect(sectionText(blocks(text)[0])).toBe(text);
+  });
+
+  it('keeps a lone numbered item with nothing under it, and one inside a run, a real list', () => {
+    expect(kinds('Steps:\n1. only')).toEqual(['section', 'list']);
+    expect(kinds('1. a\n2. b\ntext')).toEqual(['list', 'section']);
+  });
+
   it('still turns the surrounding bullets into a list', () => {
     expect(kinds('1. a\ntext\n2. b\n\n- x\n- y')).toEqual(['section', 'list']);
   });

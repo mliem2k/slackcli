@@ -433,6 +433,17 @@ function keepInterruptedNumberingAsText(segments: Segment[]): Segment[] {
     }
     sawProse = false;
   }
+  // A lone numbered item that is directly followed by text is the title line of that text ("1. title", "MR: ...", "Ticket: ..."),
+  // not a list: as a real list item it would be cut off from the lines under it and lose the line breaks around it.
+  segments.forEach((part, index) => {
+    if (part.kind !== 'item' || part.item.style !== 'ordered' || demote.has(index)) return;
+    const touchesOrderedItem = (other: Segment | undefined) =>
+      other !== undefined && other.kind === 'item' && other.item.style === 'ordered' && other.item.indent === part.item.indent;
+    const after = segments[index + 1];
+    if (!touchesOrderedItem(segments[index - 1]) && !touchesOrderedItem(after) && after !== undefined && after.kind === 'prose' && after.text.trim() !== '') {
+      demote.add(index);
+    }
+  });
   return segments.map((part, index) => (demote.has(index) && part.kind === 'item' ? { kind: 'prose', text: part.raw } : part));
 }
 
