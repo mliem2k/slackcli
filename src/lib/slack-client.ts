@@ -19,7 +19,7 @@ import { extractSlackWorkspaceName } from './curl-parser.ts';
 import { RateLimiter, slackRateLimiter } from './rate-limiter.ts';
 import { decideRetry, parseRetryAfter, resolveRetryOptions } from './retry.ts';
 import type { RetryOptions } from './retry.ts';
-import { InvalidInputError, UnsupportedAuthTypeError } from './cli-errors.ts';
+import { InvalidInputError, NotFoundError, UnsupportedAuthTypeError } from './cli-errors.ts';
 import { SlackAuthError, authErrorProfile, isAuthErrorCode } from './auth-errors.ts';
 import type { CanvasSectionCriteria } from './canvas-sections.ts';
 import type { CanvasChange } from './canvas-write.ts';
@@ -673,13 +673,44 @@ export class SlackClient {
     return this.request('chat.getPermalink', { channel, message_ts: messageTs });
   }
 
-  async updateMessage(channel: string, ts: string, rawText: string): Promise<any> {
+  // `options.file_ids` names the files the message carries after the edit:
+  // chat.update replaces the message's file list with it, so an id left out is
+  // detached. Leave it undefined to edit the text and keep the files as they are.
+  async updateMessage(channel: string, ts: string, rawText: string, options: { file_ids?: string[] } = {}): Promise<any> {
     const text = markdownLinksToSlack(rawText);
     // `parse` must be explicit: chat.update defaults it to `client` (unlike
     // chat.postMessage, which defaults to `none`), and that escapes the
     // `<url|label>` markup in the text, so editing a message kills its links.
     const blocks = listBlocksFor(text);
-    return this.request('chat.update', { channel, ts, text, parse: 'none', ...(blocks ? { blocks } : {}) });
+    return this.request('chat.update', {
+      channel,
+      ts,
+      text,
+      parse: 'none',
+      ...(blocks ? { blocks } : {}),
+      ...(options.file_ids ? { file_ids: options.file_ids.join(',') } : {}),
+    });
+  }
+
+  // One message by timestamp: its text and the ids of the files it carries.
+  // A threaded reply is only listed by conversations.replies, so pass the
+  // parent's timestamp for one (a permalink's ?thread_ts= or --thread-ts).
+  async getMessage(channel: string, ts: string, threadTs?: string): Promise<{ text: string; fileIds: string[] }> {
+    const isReply = threadTs !== undefined && threadTs !== ts;
+    const response = isReply
+      ? await this.getConversationReplies(channel, threadTs, { oldest: ts, latest: ts, inclusive: true, limit: 1 })
+      : await this.getConversationHistory(channel, { oldest: ts, latest: ts, inclusive: true, limit: 1 });
+    const message = (response.messages ?? []).find((candidate: { ts?: string }) => candidate.ts === ts);
+    if (!message) {
+      throw new NotFoundError(
+        `Message ${ts} was not found in ${channel}.` +
+          (isReply ? '' : ' A threaded reply needs its parent: pass --thread-ts or a permalink with ?thread_ts=.'),
+      );
+    }
+    return {
+      text: typeof message.text === 'string' ? message.text : '',
+      fileIds: (message.files ?? []).map((file: { id: string }) => file.id),
+    };
   }
 
   async deleteMessage(channel: string, ts: string): Promise<any> {

@@ -281,6 +281,25 @@ order to edit it.
 body comes from a UTF-8 file, or from standard input with `-`, mutually
 exclusive with `--message`.
 
+### Changing the files of a sent message
+
+```bash
+# Replace the files (the current ones are detached); the text is kept.
+slackcli messages edit --permalink="https://myteam.slack.com/archives/C1234567890/p1234567890123456" --file=./after.png
+# Add to the current files.
+slackcli messages edit --permalink="..." --file=./extra.png --keep-files
+# Detach every file.
+slackcli messages edit --permalink="..." --clear-files
+```
+
+`--file` is repeatable (at most 10 files in all). Without `--message` or
+`--message-file` the current text is read back and kept. A permalink to a
+threaded reply carries its `thread_ts`; with `--channel-id` pass
+`--thread-ts` so the reply can be read. `--clear-files` cannot be combined
+with `--file` or `--keep-files`, and `--keep-files` needs a `--file`. Files are
+uploaded before the edit, so a bad path changes nothing, and `--dry-run` lists
+the files and the kept ids without uploading.
+
 ## `messages delete`
 
 ```bash

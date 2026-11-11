@@ -336,6 +336,8 @@ export interface ThreadTargetInput {
 export interface ResolvedMessageTarget {
   channelId: string;
   timestamp: string;
+  /** Parent timestamp from the permalink's ?thread_ts=, when the link points at a threaded reply. */
+  threadTs?: string;
   workspace?: string;
 }
 
@@ -382,6 +384,7 @@ export function resolveMessageTarget(
     return {
       channelId: parsed.channelId,
       timestamp: parsed.timestamp,
+      ...(parsed.threadTs ? { threadTs: parsed.threadTs } : {}),
       workspace: parsed.workspace,
     };
   }
