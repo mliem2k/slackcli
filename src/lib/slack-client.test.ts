@@ -757,6 +757,30 @@ describe('SlackClient.updateMessage', () => {
     expect((client.calls[0]!.params as { text: string }).text.length).toBe(5000);
   });
 
+  it('sends the file ids of the edit as one comma joined list, and none when the files are left alone', async () => {
+    const client = new TestSlackClient();
+
+    await client.updateMessage('C123', '1234567890.123456', 'Text', { file_ids: ['F1', 'F2', 'F3'] });
+    await client.updateMessage('C123', '1234567890.123456', 'Text', {});
+    await client.updateMessage('C123', '1234567890.123456', 'Text');
+
+    expect(client.calls[0]!.params.file_ids).toBe('F1,F2,F3');
+    expect('file_ids' in client.calls[1]!.params).toBe(false);
+    expect('file_ids' in client.calls[2]!.params).toBe(false);
+  });
+
+  it('keeps the file ids when the long fallback text is trimmed', async () => {
+    const client = new TestSlackClient();
+    const long = `Intro\n• item\n${'x'.repeat(5000)}`;
+
+    await client.updateMessage('C123', '1234567890.123456', long, { file_ids: ['F9'] });
+
+    const params = client.calls[0]!.params as { text: string; blocks: unknown; file_ids: string };
+    expect(params.blocks).toBeDefined();
+    expect(new TextEncoder().encode(params.text).length).toBe(4000);
+    expect(params.file_ids).toBe('F9');
+  });
+
   it('counts & < > the way Slack escapes them and never cuts inside link markup', () => {
     expect(fitUpdateText('&'.repeat(900))).toBe('&'.repeat(799) + '…');
     expect(fitUpdateText('’'.repeat(1400))).toBe('’'.repeat(1332) + '…');
@@ -2690,5 +2714,61 @@ describe('SlackClient Later-list writes (#436)', () => {
     await expect(client.updateSavedItem('C123', TS, { date_due: 0 })).rejects.toThrow(SAVED_WRITE_AUTH_MESSAGE);
     await expect(client.deleteSavedItem('C123', TS)).rejects.toThrow(SAVED_WRITE_AUTH_MESSAGE);
     expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe('SlackClient.getMessage', () => {
+  class ReadClient extends TestSlackClient {
+    constructor(private readonly messages: Array<Record<string, unknown>>) {
+      super();
+    }
+
+    override async request(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+      if (method === 'conversations.history' || method === 'conversations.replies') {
+        this.calls.push({ method, params });
+        return { ok: true, messages: this.messages };
+      }
+      return super.request(method, params);
+    }
+  }
+
+  const TS = '1712345678.000100';
+  const PARENT = '1712345600.000200';
+
+  it('reads a top level message from the channel history and returns its text and file ids', async () => {
+    const client = new ReadClient([{ ts: TS, text: 'Hello', files: [{ id: 'F1' }, { id: 'F2' }] }]);
+
+    const message = await client.getMessage('C123', TS);
+
+    expect(message).toEqual({ text: 'Hello', fileIds: ['F1', 'F2'] });
+    expect(client.calls[0]).toEqual({
+      method: 'conversations.history',
+      params: { channel: 'C123', oldest: TS, latest: TS, inclusive: true, limit: 1 },
+    });
+  });
+
+  it('reads a reply through the replies of its parent', async () => {
+    const client = new ReadClient([{ ts: TS, text: 'Reply' }]);
+
+    const message = await client.getMessage('C123', TS, PARENT);
+
+    expect(message).toEqual({ text: 'Reply', fileIds: [] });
+    expect(client.calls[0]!.method).toBe('conversations.replies');
+    expect(client.calls[0]!.params).toEqual({ channel: 'C123', ts: PARENT, oldest: TS, latest: TS, inclusive: true, limit: 1 });
+  });
+
+  it('treats a thread timestamp equal to the message as a top level message', async () => {
+    const client = new ReadClient([{ ts: TS, text: 'Parent' }]);
+
+    await client.getMessage('C123', TS, TS);
+
+    expect(client.calls[0]!.method).toBe('conversations.history');
+  });
+
+  it('refuses when the message is not in the answer, and hints at the parent for a reply', async () => {
+    const other = new ReadClient([{ ts: PARENT, text: 'The parent came back instead' }]);
+
+    await expect(other.getMessage('C123', TS)).rejects.toThrow(/--thread-ts/);
+    await expect(other.getMessage('C123', TS, PARENT)).rejects.toThrow(`Message ${TS} was not found in C123.`);
   });
 });

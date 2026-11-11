@@ -30,6 +30,7 @@ import {
 import {
   checkUploadFile,
   DRAFT_CREATE_AUTH_MESSAGE,
+  EDIT_FILES_AUTH_MESSAGE,
   DRAFT_DELETE_AUTH_MESSAGE,
   SCHEDULED_MESSAGES_AUTH_MESSAGE,
   type SlackClient,
@@ -48,6 +49,7 @@ import {
   splitUserRefs,
 } from '../lib/name-resolver.ts';
 import { resolveMessageText } from '../lib/message-input.ts';
+import { assertFileCount, editsFiles, finalFileIds, readBackText, validateEditFileOptions } from '../lib/message-edit-files.ts';
 import { parseScheduleTime } from '../lib/schedule-time.ts';
 import { deleteMessage, removeReaction } from '../lib/message.ts';
 import { resolvePostThread } from '../lib/thread-parent.ts';
@@ -185,15 +187,19 @@ const HELP = {
     dryRun: true,
   },
   edit: {
-    summary: 'Replace the text of a message you posted',
+    summary: 'Replace the text or files of your message',
     description:
-      'Replace the text of an existing message posted by the authenticated user or app. ' +
+      'Replace the text of an existing message posted by the authenticated user or app, and optionally its files. ' +
+      '--file uploads local files and makes them the message\'s files (the current ones are detached); ' +
+      '--keep-files keeps the current files and adds the new ones. Attaching files needs a browser session token (xoxc), like drafts. ' +
+      'With --file and no --message or --message-file the text is sent back as Slack returned it (a message without text, or text over 3,900 bytes, needs --message). ' +
       MESSAGE_TARGET_TEXT,
     examples: [
       'slackcli messages edit --channel-id C0123456789 --timestamp 1712345678.123456 --message "Corrected text"',
       'slackcli messages edit --permalink https://acme.slack.com/archives/C0123456789/p1712345678123456 --message-file ./fixed.md --json',
+      'slackcli messages edit --permalink https://acme.slack.com/archives/C0123456789/p1712345678123456?thread_ts=1712345600.000100 --file ./after.png --keep-files',
     ],
-    json: '{ channel_id, ts } of the edited message.',
+    json: '{ channel_id, ts, file_ids? } of the edited message; file_ids lists the message\'s files after the edit and is present only when --file was given.',
     notes: [
       MESSAGE_ID_FORMATS_NOTE,
       CHANNEL_NAME_NOTE,
@@ -202,6 +208,9 @@ const HELP = {
       STDIN_NOTE,
       TEXT_MENTION_NOTE,
       'Edits immediately, with no confirmation prompt.',
+      'The new files are uploaded first, so a bad path or a failed upload changes nothing. chat.update takes the message\'s new list of file ids, ' +
+        'so an id missing from it is detached: use --keep-files to add without removing. A message can carry at most 10 files, checked before the upload.',
+      'Reading the current text or files of a threaded reply needs its parent: use a permalink with ?thread_ts= or --thread-ts (the two must agree when both are given).',
     ],
     dryRun: true,
   },
@@ -976,6 +985,9 @@ export function createMessagesCommand(): Command {
       new Option('--message-file <path>', 'Read the new message text from a UTF-8 file, or stdin with -')
         .conflicts('message')
     )
+    .option('--file <path>', `Attach a local file to the message, replacing its current files (repeat for several, up to ${MAX_DRAFT_FILES})`, collectDraftFile, [] as string[])
+    .option('--keep-files', 'With --file: keep the files the message already carries and add the new ones', false)
+    .option('--thread-ts <ts>', 'Parent timestamp of the thread when the message is a reply (needed only to read its current text or files)')
     .option('--workspace <id|name>', 'Workspace to use')
     .option('--json', 'Output the updated message as JSON', false)
     .option(DRY_RUN_FLAG, DRY_RUN_DESCRIPTION, false)
@@ -983,16 +995,45 @@ export function createMessagesCommand(): Command {
       const spinner = ora('Updating message...').start();
 
       try {
-        let message = await resolveMessageText(options);
+        const fileOptions = { paths: options.file as string[], keepFiles: options.keepFiles };
+        validateEditFileOptions(fileOptions);
+        const changesFiles = editsFiles(fileOptions);
+        const hasText = options.message !== undefined || options.messageFile !== undefined;
+        if (!hasText && !changesFiles) {
+          throw new InvalidInputError('Either --message, --message-file or --file is required');
+        }
+        const checkedFiles = await checkDraftFiles(fileOptions.paths);
+        let message = hasText ? await resolveMessageText(options) : undefined;
         const target = resolveMessageTarget(
           { permalink: options.permalink, channelId: options.channelId, timestamp: options.timestamp },
           { channel: '--channel-id', timestamp: '--timestamp' }
         );
+        const suppliedThreadTs = options.threadTs !== undefined ? normalizeTimestamp(options.threadTs, '--thread-ts') : undefined;
+        if (suppliedThreadTs !== undefined && target.threadTs !== undefined && suppliedThreadTs !== target.threadTs) {
+          throw new InvalidInputError(`--thread-ts ${suppliedThreadTs} conflicts with the thread_ts ${target.threadTs} of the permalink; give only one`);
+        }
+        const threadTs = suppliedThreadTs ?? target.threadTs;
 
         const client = await getAuthenticatedClient(options.workspace);
         warnOnWorkspaceMismatch(client, target.workspace);
+        if (changesFiles) {
+          // The upload of a file is the browser session's call, so an app token is refused here, in a dry run too.
+          client.requireBrowserAuth(EDIT_FILES_AUTH_MESSAGE);
+        }
         const channelId = await resolveTargetArg(client, options.channelId, target.channelId, '--channel-id', spinner);
-        message = await withMentions(client, message, spinner);
+
+        // The current message is read only when the edit needs it: its text when no new text was
+        // given (chat.update replaces the text), its file ids to keep them.
+        let current: { text: string; fileIds: string[] } | undefined;
+        if (message === undefined || fileOptions.keepFiles) {
+          spinner.text = 'Reading the current message...';
+          current = await client.getMessage(channelId, target.timestamp, threadTs);
+        }
+        assertFileCount(fileOptions, current?.fileIds);
+
+        // New text is turned into mentions as in every other command; text read back from the message is sent as it was,
+        // so a file only edit never pings anyone the original did not.
+        message = message === undefined ? readBackText(current?.text ?? '') : await withMentions(client, message, spinner);
 
         if (options.dryRun) {
           spinner.stop();
@@ -1001,7 +1042,11 @@ export function createMessagesCommand(): Command {
               client,
               'edit message',
               { kind: 'message', id: channelId, ts: target.timestamp },
-              { text: message },
+              {
+                text: message,
+                ...(checkedFiles.length ? { files: checkedFiles.map((file) => ({ file: file.path, file_size: file.size })) } : {}),
+                ...(fileOptions.keepFiles ? { kept_file_ids: current?.fileIds ?? [] } : {}),
+              },
               { lookupName: true },
             ),
             options.json,
@@ -1009,15 +1054,21 @@ export function createMessagesCommand(): Command {
           return;
         }
 
+        const uploadedIds = await uploadDraftFiles(client, fileOptions.paths, {
+          onProgress: (progress) => { spinner.text = progress; },
+        });
+        const fileIds = finalFileIds(fileOptions, uploadedIds, current?.fileIds);
+        spinner.text = 'Updating message...';
         const response = await client.updateMessage(
           channelId,
           target.timestamp,
           message,
+          fileIds ? { file_ids: fileIds } : {},
         );
 
         spinner.succeed('Message updated successfully!');
         if (options.json) {
-          writeJson({ channel_id: channelId, ts: response.ts });
+          writeJson({ channel_id: channelId, ts: response.ts, ...(fileIds ? { file_ids: fileIds } : {}) });
         } else {
           success(`Message timestamp: ${response.ts}`);
         }

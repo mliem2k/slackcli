@@ -281,6 +281,41 @@ order to edit it.
 body comes from a UTF-8 file, or from standard input with `-`, mutually
 exclusive with `--message`.
 
+### Changing the files of a sent message
+
+```bash
+# Replace the files (the current ones are detached); the text is kept.
+slackcli messages edit --permalink="https://myteam.slack.com/archives/C1234567890/p1234567890123456" --file=./after.png
+# Add to the current files.
+slackcli messages edit --permalink="..." --file=./extra.png --keep-files
+```
+
+`--file` is repeatable. A message carries at most 10 files, and with
+`--keep-files` the current files count toward that; the count is checked before
+anything is uploaded, in a dry run too. Attaching a file is the browser
+session's call (a `xoxc` token, like drafts), so an app token is refused up
+front. `chat.update` takes the message's new list of file ids, so the files
+uploaded by `--file` replace the current ones unless `--keep-files` is given.
+
+Without `--message` or `--message-file` the current text is read back and sent as
+Slack returned it, with no mention rewriting. A message that has no text, or
+whose text is over 3,900 bytes, is refused: pass the text with `--message`. A
+permalink to a threaded reply carries its `thread_ts`; with `--channel-id`
+pass `--thread-ts` so the reply can be read, and when both a permalink and
+`--thread-ts` are given they must agree. The files are uploaded before the
+edit, so a bad path changes nothing, and `--dry-run` lists the files and the
+kept ids without uploading or editing.
+
+With `--file` the `--json` output also lists the message's files after the edit:
+
+```json
+{
+  "channel_id": "C1234567890",
+  "ts": "1234567890.123456",
+  "file_ids": ["F0123456789", "F0123456790"]
+}
+```
+
 ## `messages delete`
 
 ```bash
