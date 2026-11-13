@@ -544,7 +544,11 @@ export function parseMrkdwn(input: string, opts: InlineOptions = {}): RichTextBl
  * every other message keeps Slack's own text rendering exactly as before.
  */
 export function listBlocksFor(text: string): RichTextBlock[] | undefined {
-  // Sent with blocks, the text loses Slack's own linking of bare URLs, so link them here.
+  // Sent with blocks, the text loses Slack's own linking of bare URLs, so link them here. A bare URL
+  // also needs blocks: chat.update with parse=none stores it as plain, unclickable text.
   const blocks = parseMrkdwn(text, { linkUrls: true });
-  return blocks[0].elements.some((element) => element.type === 'rich_text_list') ? blocks : undefined;
+  const needsBlocks = blocks[0].elements.some(
+    (element) => element.type === 'rich_text_list' || JSON.stringify(element).includes('"type":"link"'),
+  );
+  return needsBlocks ? blocks : undefined;
 }

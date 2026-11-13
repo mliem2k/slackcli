@@ -749,6 +749,16 @@ describe('SlackClient.updateMessage', () => {
     expect(JSON.stringify(params.blocks)).toContain('x'.repeat(5000));
   });
 
+  it('sends a bare URL as a link element, since chat.update with parse=none leaves it unclickable', async () => {
+    const client = new TestSlackClient();
+
+    await client.updateMessage('C123', '1234567890.123456', 'MR: https://gitlab.com/a/b/-/merge_requests/1\nThanks');
+
+    const blocks = JSON.stringify(client.calls[0]!.params.blocks);
+    expect(blocks).toContain('"type":"link"');
+    expect(blocks).toContain('"url":"https://gitlab.com/a/b/-/merge_requests/1"');
+  });
+
   it('leaves long text without blocks for Slack to judge', async () => {
     const client = new TestSlackClient();
 
