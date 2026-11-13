@@ -908,6 +908,23 @@ describe('SlackClient.createDraft', () => {
       { type: 'link', url: 'https://x.test', text: 'docs' },
     ]);
   });
+
+  it('links bare URLs, so a sent draft has clickable links and URL underscores never pair as italics', async () => {
+    const client = new TestSlackClient();
+    const a = 'https://gitlab.com/g/p/-/merge_requests/40';
+    const b = 'https://gitlab.com/g/q/-/merge_requests/2573';
+
+    await client.createDraft('C123', `MR: ${a}\nMR: ${b}.`);
+
+    const blocks = JSON.parse(String(client.calls[0]?.params.blocks));
+    expect(blocks[0].elements[0].elements).toEqual([
+      { type: 'text', text: 'MR: ' },
+      { type: 'link', url: a },
+      { type: 'text', text: '\nMR: ' },
+      { type: 'link', url: b },
+      { type: 'text', text: '.' },
+    ]);
+  });
 });
 
 describe('SlackClient.createDraft with files', () => {
@@ -1032,6 +1049,18 @@ describe('SlackClient.updateDraft', () => {
     // Echoing the server's own last_updated_ts is rejected with draft_has_conflict.
     expect(call.params.client_last_updated_ts).not.toBe(draft.last_updated_ts);
     expect(Number(call.params.client_last_updated_ts)).toBeGreaterThan(Number(draft.last_updated_ts));
+  });
+
+  it('links bare URLs in the new text', async () => {
+    const client = new TestSlackClient();
+
+    await client.updateDraft(draft, 'Ticket: https://x.atlassian.net/browse/F22-7295');
+
+    const blocks = JSON.parse(client.calls[0]!.params.blocks as string);
+    expect(blocks[0].elements[0].elements).toEqual([
+      { type: 'text', text: 'Ticket: ' },
+      { type: 'link', url: 'https://x.atlassian.net/browse/F22-7295' },
+    ]);
   });
 
   it('sends a DM draft destination with its channel id only, because Slack refuses channel_id and user_ids together', async () => {

@@ -206,7 +206,7 @@ describe('review fixes', () => {
     expect(els[0].elements.map(sectionText)).toEqual(['a', 'b']);
   });
 
-  it('links bare URLs only on the send path', () => {
+  it('links bare URLs only when asked to (every client path asks)', () => {
     const sent = listBlocksFor('- see https://example.com/a_b_(c). next')![0].elements[0] as any;
     expect(sent.elements[0].elements).toEqual([
       { type: 'text', text: 'see ' },

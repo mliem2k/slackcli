@@ -870,7 +870,8 @@ export class SlackClient {
   } = {}): Promise<any> {
     this.requireBrowserAuth(DRAFT_CREATE_AUTH_MESSAGE);
 
-    const blocks = parseMrkdwn(text);
+    // A draft is sent as these blocks, and Slack does not link a bare URL inside rich_text, so link it here.
+    const blocks = parseMrkdwn(text, { linkUrls: true });
     const destinations = draftDestinations(channelId, options.thread_ts);
     const fileIds = options.file_ids ?? [];
 
@@ -946,7 +947,7 @@ export class SlackClient {
       draftId: draft.id,
       clientLastUpdatedTs: SlackClient.clientTimestampAfter(draft.last_updated_ts),
       clientMsgId: draft.client_msg_id ?? crypto.randomUUID(),
-      blocks: parseMrkdwn(text),
+      blocks: parseMrkdwn(text, { linkUrls: true }),
       // A DM draft lists both channel_id and user_ids; drafts.update refuses the pair.
       destinations: draft.destinations.map(({ user_ids, ...rest }) => (rest.channel_id ? rest : { user_ids, ...rest })),
       fileIds: options.file_ids ?? draft.file_ids ?? [],

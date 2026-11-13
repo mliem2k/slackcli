@@ -80,7 +80,7 @@ interface SpanBounds {
 }
 
 interface InlineOptions {
-  /** Turn bare http(s) URLs into link elements (send path; drafts keep them as text). */
+  /** Turn bare http(s) URLs into link elements: every message sent as rich_text needs it, drafts included. */
   linkUrls?: boolean;
 }
 
